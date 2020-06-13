@@ -210,6 +210,14 @@ sudo ip tuntap add name vunet-tap0 mode tap
 # Create tap interface with multipe queues support for vhost_user_net test.
 sudo ip tuntap add name vunet-tap1 mode tap multi_queue
 
+THRDS=$(nproc --all)
+if [ true = "$COVERAGE" ]; then
+    export CARGO_INCREMENTAL=0
+    export RUSTFLAGS="-Zprofile -Ccodegen-units=1 -Copt-level=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests -Cpanic=abort"
+    export RUSTDOCFLAGS="-Cpanic=abort"
+    THRDS=2
+fi
+
 BUILD_TARGET="$(uname -m)-unknown-linux-${CH_LIBC}"
 CFLAGS=""
 TARGET_CC=""
@@ -250,7 +258,7 @@ sudo chmod a+rwX /dev/hugepages
 sudo adduser $USER kvm
 newgrp kvm << EOF
 export RUST_BACKTRACE=1
-time cargo test --features "integration_tests" "$@" -- --nocapture
+time cargo test --features "integration_tests" "$@" -- --nocapture --test-threads $THRDS
 EOF
 RES=$?
 
@@ -269,7 +277,7 @@ if [ $RES -eq 0 ]; then
 
     newgrp kvm << EOF
 export RUST_BACKTRACE=1
-time cargo test --features "integration_tests,mmio" "$@" -- --nocapture
+time cargo test --features "integration_tests,mmio" "$@" -- --nocapture --test-threads $THRDS
 EOF
 
     RES=$?
@@ -285,5 +293,16 @@ sudo ip link del vfio-tap3
 # Tear vhost_user_net test network down
 sudo ip link del vunet-tap0
 sudo ip link del vunet-tap1
+
+if [ true = "$COVERAGE" ]; then
+    BASE_DIR=./target
+    LCOV_INFO=$BASE_DIR/$BUILD_TARGET.lcov.info
+    OUT_DIR=$BASE_DIR/coverage
+
+    grcov $BASE_DIR -s . -t lcov --branch --ignore-not-existing -o $LCOV_INFO \
+	    --ignore '*registry/*' --ignore '*git/*' --ignore '*target/*'
+    rm -rf $OUT_DIR
+    genhtml -o $OUT_DIR --show-details --highlight --ignore-errors source --legend $LCOV_INFO --function-coverage --branch-coverage
+fi
 
 exit $RES

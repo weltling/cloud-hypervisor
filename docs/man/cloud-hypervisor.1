@@ -1,0 +1,146 @@
+.\" Virtual Machine Monitor for modern Cloud workloads.
+.\" File a PR under https://github.com/cloud-hypervisor/cloud-hypervisor/issues to extend or correct errors.
+.TH cloud-hypervisor 1 (date) "1.0" "Cloud Hypervisor VMM"
+.SH NAME
+cloud-hypervisor \- launch Cloud Hypervisor VMM
+.SH SYNOPSIS
+.nf
+.BR cloud-hypervisor " [OPTIONS]"
+.fi
+.SH DESCRIPTION
+.B Cloud Hypervisor
+is an open source Virtual Machine Monitor (VMM) that runs on top of the KVM hypervisor and the Microsoft Hypervisor (MSHV).
+.PP
+.SH OPTIONS
+.TP
+.BR \-\-cpus " cpu-parameters"
+CPU parameters.
+.IP
+.IR "boot\fR=\fP" boot_vcpus "\fR,\fPmax\fR=\fP" max_vcpus "\fR,\fPtopology\fR=\fP" threads_per_core:cores_per_die:dies_per_package:packages "\fR,\fPkvm_hyperv\fR=\fP" on|off "\fR,\fPmax_phys_bits\fR=\fP" maximum_number_of_physical_bits "\fR,\fPaffinity\fR=\fP" list_of_vcpus_with_their_associated_cpuset "\fR,\fPfeatures\fR=\fP" list_of_features_to_enable
+.IP
+default:boot=1,max_phys_bits=46
+.TP
+.BR \-\-platform " platform-parameters"
+Platform parameters.
+.IP
+.IR "num_pci_segments\fR=\fP" num_pci_segments "\fR,\fPiommu_segments\fR=\fP" list_of_segments "\fR,\fPserial_number\fR=\fP" dmi_device_serial_number "\fR,\fPuuid\fR=\fP" dmi_device_uuid "\fR,\fPoem_strings\fR=\fP" list_of_strings
+.TP
+.BR \-\-memory " memory-parameters"
+Memory parameters.
+.IP
+.IR "size\fR=\fP" guest_memory_size "\fR,\fPmergeable\fR=\fP" on|off "\fR,\fPshared\fR=\fP" on|off "\fR,\fPhugepages\fR=\fP" on|off "\fR,\fPhugepage_size\fR=\fP" hugepage_size "\fR,\fPhotplug_method\fR=\fP" acpi|virtio-mem "\fR,\fPhotplug_size\fR=\fP" hotpluggable_memory_size "\fR,\fPhotplugged_size\fR=\fP" hotplugged_memory_size "\fR,\fPprefault\fR=\fP" on|off "\fR,\fPthp\fR=\fP" on|off
+.IP
+default:size=512M
+.TP
+.BR \-\-memory-zone " memory-zone-parameters"
+User defined memory zone parameters.
+.IP
+.IR "size\fR=\fP" guest_memory_region_size "\fR,\fPshared\fR=\fP" on|off "\fR,\fPhugepages\fR=\fP" on|off "\fR,\fPhugepage_size\fR=\fP" hugepage_size "\fR,\fPhost_numa_node\fR=\fP" node_id "\fR,\fPid\fR=\fP" zone_identifier "\fR,\fPhotplug_size\fR=\fP" hotpluggable_memory_size "\fR,\fPhotplugged_size\fR=\fP" hotplugged_memory_size "\fR,\fPprefault\fR=\fP" on|off
+.TP
+.BR \-\-firmware " firmware"
+Path to firmware that is loaded in an architectural specific way.
+.TP
+.BR \-\-kernel " kernel"
+Path to kernel to load. This may be a kernel or firmware that supports a PVH entry point (e.g. vmlinux) or architecture equivalent.
+.TP
+.BR \-\-initramfs " initramfs"
+Path to initramfs image.
+.TP
+.BR \-\-cmdline " cmdline"
+Kernel command line.
+.TP
+.BR \-\-disk " disk-parameters"
+Disk parameters.
+.IP
+"path=<disk_image_path>,readonly=on|off,direct=on|off,iommu=on|off,num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,vhost_user=on|off,socket=<vhost_user_socket_path>,bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,id=<device_id>,pci_segment=<segment_id>"
+.TP
+.BR \-\-net " net-parameters"
+Network parameters.
+.IP
+"tap=<if_name>,ip=<ip_addr>,mask=<net_mask>,mac=<mac_addr>,fd=<fd1,fd2...>,iommu=on|off,num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,id=<device_id>,vhost_user=<vhost_user_enable>,socket=<vhost_user_socket_path>,vhost_mode=client|server,bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,pci_segment=<segment_id>"
+.TP
+.BR \-\-rng " rng-parameters"
+Random number generator parameters "src=<entropy_source_path>,iommu=on|off" [default: src=/dev/urandom]
+.TP
+.BR \-\-balloon " balloon-parameters"
+Balloon parameters "size=<balloon_size>,deflate_on_oom=on|off,free_page_reporting=on|off"
+.TP
+.BR \-\-fs " fs-parameters"
+virtio-fs parameters.
+.IP
+"tag=<tag_name>,socket=<socket_path>,num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,id=<device_id>,pci_segment=<segment_id>"
+.TP
+.BR \-\-pmem " pmem-parameters"
+Persistent memory parameters.
+.IP
+"file=<backing_file_path>,size=<persistent_memory_size>,iommu=on|off,discard_writes=on|off,id=<device_id>,pci_segment=<segment_id>"
+.TP
+.BR \-\-serial " serial-parameters"
+Control serial port: off|null|pty|tty|file=/path/to/a/file [default: null]
+.TP
+.BR \-\-console " console-parameters"
+Control (virtio) console: "off|null|pty|tty|file=/path/to/a/file,iommu=on|off" [default: tty]
+.TP
+.BR \-\-device " device-parameters"
+Direct device assignment parameters "path=<device_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>"
+.TP
+.BR \-\-user-device " user-device-parameters"
+Userspace device socket=<socket_path>,id=<device_id>,pci_segment=<segment_id>"
+.TP
+.BR \-\-vdpa " vdpa-parameters"
+vDPA device "path=<device_path>,num_queues=<number_of_queues>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>"
+.TP
+.BR \-\-vsock " vsock-parameters"
+Virtio VSOCK parameters "cid=<context_id>,socket=<socket_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>"
+.TP
+.BR \-\-numa " numa-parameters"
+Settings related to a given NUMA node
+.IP
+"guest_numa_id=<node_id>,cpus=<cpus_id>,distances=<list_of_distances_to_destination_nodes>,memory_zones=<list_of_memory_zones>,sgx_epc_sections=<list_of_sgx_epc_sections>"
+.TP
+.BR \-\-watchdog
+Enable virtio-watchdog
+.TP
+.BR \-v
+Sets the level of debugging output
+.TP
+.BR \-\-log-file " log-file"
+Log file. Standard error is used if not specified
+.TP
+.BR \-\-api-socket " api-socket"
+HTTP API socket (UNIX domain socket): path=</path/to/a/file> or fd=<fd>.
+.TP
+.BR \-\-event-monitor " event-monitor"
+File to report events on: path=</path/to/a/file> or fd=<fd>
+.TP
+.BR \-\-restore " restore"
+Restore from a VM snapshot. 
+Restore parameters "source_url=<source_url>,prefault=on|off" 
+`source_url` should be a valid URL (e.g file:///foo/bar or tcp://192.168.1.10/foo) 
+`prefault` brings memory pages in when enabled (disabled by default)
+.TP
+.BR \-\-seccomp " seccomp"
+[default: true] [possible values: true, false, log]
+.TP
+.BR \-\-tpm " tpm"
+TPM device "(UNIX Domain Socket from swtpm) socket=</path/to/a/socket>"
+.TP
+.BR \-\-sgx-epc " sgx-epc-parameters"
+SGX EPC parameters "id=<epc_section_identifier>,size=<epc_section_size>,prefault=on|off"
+.TP
+.BR \-h "\fR,\fP \-\-help"
+Print help information
+.TP
+.BR \-V "\fR,\fP \-\-version"
+Print version information
+.SH FILES
+.TP
+.I /usr/share/cloud-hypervisor/CLOUDHV_EFI.fd
+Cloud Hypervisor compatible EDK II firmware.
+.TP
+.I /usr/share/cloud-hypervisor/hypervisor-fw
+Cloud Hypervisor compatible firmware written in Rust.
+.SH SEE ALSO
+ch-remote(1)
+.SH BUGS
+Report bugs under https://github.com/cloud-hypervisor/cloud-hypervisor/issues

@@ -21,6 +21,13 @@ use crate::MpState;
 use thiserror::Error;
 use vm_memory::GuestAddress;
 
+#[derive(Copy, Clone)]
+pub enum CpuVendor {
+    Intel,
+    AMD,
+    Unknown,
+}
+
 #[derive(Error, Debug)]
 ///
 /// Enum for CPU error

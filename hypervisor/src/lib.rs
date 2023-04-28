@@ -49,7 +49,7 @@ mod cpu;
 mod device;
 
 pub use crate::hypervisor::{Hypervisor, HypervisorError};
-pub use cpu::{HypervisorCpuError, Vcpu, VmExit};
+pub use cpu::{HypervisorCpuError, Vcpu, VmExit, CpuVendor};
 pub use device::HypervisorDeviceError;
 #[cfg(all(feature = "kvm", target_arch = "aarch64"))]
 pub use kvm::{aarch64, GicState};

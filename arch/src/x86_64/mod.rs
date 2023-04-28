@@ -16,7 +16,7 @@ use crate::GuestMemoryMmap;
 use crate::InitramfsConfig;
 use crate::RegionType;
 use hypervisor::arch::x86::{CpuIdEntry, CPUID_FLAG_VALID_INDEX};
-use hypervisor::{HypervisorCpuError, HypervisorError};
+use hypervisor::{CpuVendor, HypervisorCpuError, HypervisorError};
 use linux_loader::loader::bootparam::boot_params;
 use linux_loader::loader::elf::start_info::{
     hvm_memmap_table_entry, hvm_modlist_entry, hvm_start_info,
@@ -617,7 +617,7 @@ pub fn generate_common_cpuid(
     CpuidPatch::patch_cpuid(&mut cpuid, cpuid_patches);
 
     if let Some(t) = topology {
-        update_cpuid_topology(&mut cpuid, t.0, t.1, t.2);
+        update_cpuid_topology(&mut cpuid, t.0, t.1, t.2, hypervisor.get_cpu_vendor());
     }
 
     if let Some(sgx_epc_sections) = sgx_epc_sections {
@@ -769,11 +769,16 @@ pub fn configure_vcpu(
     boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
     cpuid: Vec<CpuIdEntry>,
     kvm_hyperv: bool,
+    cpu_vendor: CpuVendor,
 ) -> super::Result<()> {
     // Per vCPU CPUID changes; common are handled via generate_common_cpuid()
     let mut cpuid = cpuid;
-    CpuidPatch::set_cpuid_reg(&mut cpuid, 0xb, None, CpuidReg::EDX, u32::from(id));
-    CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1f, None, CpuidReg::EDX, u32::from(id));
+    if matches!(cpu_vendor, CpuVendor::Intel) {
+        CpuidPatch::set_cpuid_reg(&mut cpuid, 0xb, None, CpuidReg::EDX, u32::from(id));
+        CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1f, None, CpuidReg::EDX, u32::from(id));
+    } else if matches!(cpu_vendor, CpuVendor::AMD) {
+        CpuidPatch::set_cpuid_reg(&mut cpuid, 0x8000_001e, None, CpuidReg::EAX, u32::from(id));
+    }
 
     // The TSC frequency CPUID leaf should not be included when running with HyperV emulation
     if !kvm_hyperv {
@@ -1078,7 +1083,7 @@ pub fn initramfs_load_addr(
     Ok(aligned_addr)
 }
 
-pub fn get_host_cpu_phys_bits() -> u8 {
+pub fn get_host_cpu_phys_bits(hypervisor: &Arc<dyn hypervisor::Hypervisor>) -> u8 {
     // SAFETY: call cpuid with valid leaves
     unsafe {
         let leaf = x86_64::__cpuid(0x8000_0000);
@@ -1087,9 +1092,7 @@ pub fn get_host_cpu_phys_bits() -> u8 {
         // Some physical address bits may become reserved when the feature is enabled.
         // See AMD64 Architecture Programmer's Manual Volume 2, Section 7.10.1
         let reduced = if leaf.eax >= 0x8000_001f
-            && leaf.ebx == 0x6874_7541    // Vendor ID: AuthenticAMD
-            && leaf.ecx == 0x444d_4163
-            && leaf.edx == 0x6974_6e65
+            && matches!(hypervisor.get_cpu_vendor(), CpuVendor::AMD)
             && x86_64::__cpuid(0x8000_001f).eax & 0x1 != 0
         {
             (x86_64::__cpuid(0x8000_001f).ebx >> 6) & 0x3f
@@ -1111,62 +1114,69 @@ fn update_cpuid_topology(
     threads_per_core: u8,
     cores_per_die: u8,
     dies_per_package: u8,
+    cpu_vendor: CpuVendor,
 ) {
     let thread_width = 8 - (threads_per_core - 1).leading_zeros();
     let core_width = (8 - (cores_per_die - 1).leading_zeros()) + thread_width;
     let die_width = (8 - (dies_per_package - 1).leading_zeros()) + core_width;
 
-    // CPU Topology leaf 0xb
-    CpuidPatch::set_cpuid_reg(cpuid, 0xb, Some(0), CpuidReg::EAX, thread_width);
-    CpuidPatch::set_cpuid_reg(
-        cpuid,
-        0xb,
-        Some(0),
-        CpuidReg::EBX,
-        u32::from(threads_per_core),
-    );
-    CpuidPatch::set_cpuid_reg(cpuid, 0xb, Some(0), CpuidReg::ECX, 1 << 8);
+    if matches!(cpu_vendor, CpuVendor::Intel) {
+        // CPU Topology leaf 0xb
+        CpuidPatch::set_cpuid_reg(cpuid, 0xb, Some(0), CpuidReg::EAX, thread_width);
+        CpuidPatch::set_cpuid_reg(
+            cpuid,
+            0xb,
+            Some(0),
+            CpuidReg::EBX,
+            u32::from(threads_per_core),
+        );
+        CpuidPatch::set_cpuid_reg(cpuid, 0xb, Some(0), CpuidReg::ECX, 1 << 8);
 
-    CpuidPatch::set_cpuid_reg(cpuid, 0xb, Some(1), CpuidReg::EAX, die_width);
-    CpuidPatch::set_cpuid_reg(
-        cpuid,
-        0xb,
-        Some(1),
-        CpuidReg::EBX,
-        u32::from(dies_per_package * cores_per_die * threads_per_core),
-    );
-    CpuidPatch::set_cpuid_reg(cpuid, 0xb, Some(1), CpuidReg::ECX, 2 << 8);
+        CpuidPatch::set_cpuid_reg(cpuid, 0xb, Some(1), CpuidReg::EAX, die_width);
+        CpuidPatch::set_cpuid_reg(
+            cpuid,
+            0xb,
+            Some(1),
+            CpuidReg::EBX,
+            u32::from(dies_per_package * cores_per_die * threads_per_core),
+        );
+        CpuidPatch::set_cpuid_reg(cpuid, 0xb, Some(1), CpuidReg::ECX, 2 << 8);
 
-    // CPU Topology leaf 0x1f
-    CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(0), CpuidReg::EAX, thread_width);
-    CpuidPatch::set_cpuid_reg(
-        cpuid,
-        0x1f,
-        Some(0),
-        CpuidReg::EBX,
-        u32::from(threads_per_core),
-    );
-    CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(0), CpuidReg::ECX, 1 << 8);
+        // CPU Topology leaf 0x1f
+        CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(0), CpuidReg::EAX, thread_width);
+        CpuidPatch::set_cpuid_reg(
+            cpuid,
+            0x1f,
+            Some(0),
+            CpuidReg::EBX,
+            u32::from(threads_per_core),
+        );
+        CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(0), CpuidReg::ECX, 1 << 8);
 
-    CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(1), CpuidReg::EAX, core_width);
-    CpuidPatch::set_cpuid_reg(
-        cpuid,
-        0x1f,
-        Some(1),
-        CpuidReg::EBX,
-        u32::from(cores_per_die * threads_per_core),
-    );
-    CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(1), CpuidReg::ECX, 2 << 8);
+        CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(1), CpuidReg::EAX, core_width);
+        CpuidPatch::set_cpuid_reg(
+            cpuid,
+            0x1f,
+            Some(1),
+            CpuidReg::EBX,
+            u32::from(cores_per_die * threads_per_core),
+        );
+        CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(1), CpuidReg::ECX, 2 << 8);
 
-    CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(2), CpuidReg::EAX, die_width);
-    CpuidPatch::set_cpuid_reg(
-        cpuid,
-        0x1f,
-        Some(2),
-        CpuidReg::EBX,
-        u32::from(dies_per_package * cores_per_die * threads_per_core),
-    );
-    CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(2), CpuidReg::ECX, 5 << 8);
+        CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(2), CpuidReg::EAX, die_width);
+        CpuidPatch::set_cpuid_reg(
+            cpuid,
+            0x1f,
+            Some(2),
+            CpuidReg::EBX,
+            u32::from(dies_per_package * cores_per_die * threads_per_core),
+        );
+        CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(2), CpuidReg::ECX, 5 << 8);
+    } else if matches!(cpu_vendor, CpuVendor::AMD) {
+        CpuidPatch::set_cpuid_reg(cpuid, 0x8000_001e, None, CpuidReg::EBX, thread_width << 8);
+        CpuidPatch::set_cpuid_reg(cpuid, 0x8000_001e, None, CpuidReg::ECX, die_width << 8);
+        CpuidPatch::set_cpuid_reg(cpuid, 0x8000_001e, None, CpuidReg::EDX, 0);
+    }
 }
 
 // The goal is to update the CPUID sub-leaves to reflect the number of EPC

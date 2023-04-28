@@ -56,6 +56,8 @@ use hypervisor::kvm::kvm_bindings;
 use hypervisor::kvm::kvm_ioctls::Cap;
 #[cfg(feature = "tdx")]
 use hypervisor::kvm::{TdxExitDetails, TdxExitStatus};
+#[cfg(target_arch = "x86_64")]
+use hypervisor::CpuVendor;
 use hypervisor::{CpuState, HypervisorCpuError, HypervisorType, VmExit, VmOps};
 use libc::{c_void, siginfo_t};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
@@ -304,6 +306,7 @@ pub struct Vcpu {
     #[cfg(target_arch = "aarch64")]
     mpidr: u64,
     saved_state: Option<CpuState>,
+    vendor: CpuVendor,
 }
 
 impl Vcpu {
@@ -314,10 +317,12 @@ impl Vcpu {
     /// * `id` - Represents the CPU number between [0, max vcpus).
     /// * `vm` - The virtual machine this vcpu will get attached to.
     /// * `vm_ops` - Optional object for exit handling.
+    /// * `cpu_vendor` - CPU vendor as reported by __cpuid(0x0)
     pub fn new(
         id: u8,
         vm: &Arc<dyn hypervisor::Vm>,
         vm_ops: Option<Arc<dyn VmOps>>,
+        cpu_vendor: CpuVendor,
     ) -> Result<Self> {
         let vcpu = vm
             .create_vcpu(id, vm_ops)
@@ -329,6 +334,8 @@ impl Vcpu {
             #[cfg(target_arch = "aarch64")]
             mpidr: 0,
             saved_state: None,
+            #[cfg(target_arch = "x86_64")]
+            vendor: cpu_vendor,
         })
     }
 
@@ -354,8 +361,15 @@ impl Vcpu {
         }
         info!("Configuring vCPU: cpu_id = {}", self.id);
         #[cfg(target_arch = "x86_64")]
-        arch::configure_vcpu(&self.vcpu, self.id, boot_setup, cpuid, kvm_hyperv)
-            .map_err(Error::VcpuConfiguration)?;
+        arch::configure_vcpu(
+            &self.vcpu,
+            self.id,
+            boot_setup,
+            cpuid,
+            kvm_hyperv,
+            self.vendor,
+        )
+        .map_err(Error::VcpuConfiguration)?;
 
         Ok(())
     }
@@ -452,6 +466,7 @@ pub struct CpuManager {
     proximity_domain_per_cpu: BTreeMap<u8, u32>,
     affinity: BTreeMap<u8, Vec<u8>>,
     dynamic: bool,
+    cpu_vendor: CpuVendor,
 }
 
 const CPU_ENABLE_FLAG: usize = 0;
@@ -606,6 +621,7 @@ impl CpuManager {
         let mut vcpu_states = Vec::with_capacity(usize::from(config.max_vcpus));
         vcpu_states.resize_with(usize::from(config.max_vcpus), VcpuState::default);
         let hypervisor_type = hypervisor.hypervisor_type();
+        let cpu_vendor = hypervisor.get_cpu_vendor();
 
         #[cfg(target_arch = "x86_64")]
         if config.features.amx {
@@ -687,6 +703,7 @@ impl CpuManager {
             proximity_domain_per_cpu,
             affinity,
             dynamic,
+            cpu_vendor,
         })))
     }
 
@@ -735,7 +752,13 @@ impl CpuManager {
     fn create_vcpu(&mut self, cpu_id: u8, snapshot: Option<Snapshot>) -> Result<Arc<Mutex<Vcpu>>> {
         info!("Creating vCPU: cpu_id = {}", cpu_id);
 
-        let mut vcpu = Vcpu::new(cpu_id, &self.vm, Some(self.vm_ops.clone()))?;
+        let mut vcpu = Vcpu::new(
+            cpu_id,
+            &self.vm,
+            Some(self.vm_ops.clone()),
+            #[cfg(target_arch = "x86_64")]
+            self.cpu_vendor,
+        )?;
 
         if let Some(snapshot) = snapshot {
             // AArch64 vCPUs should be initialized after created.

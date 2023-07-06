@@ -553,7 +553,6 @@ impl CpuidFeatureEntry {
 
 pub fn generate_common_cpuid(
     hypervisor: &Arc<dyn hypervisor::Hypervisor>,
-    topology: Option<(u8, u8, u8)>,
     sgx_epc_sections: Option<Vec<SgxEpcSection>>,
     phys_bits: u8,
     kvm_hyperv: bool,
@@ -615,10 +614,6 @@ pub fn generate_common_cpuid(
         .map_err(Error::CpuidGetSupported)?;
 
     CpuidPatch::patch_cpuid(&mut cpuid, cpuid_patches);
-
-    if let Some(t) = topology {
-        update_cpuid_topology(&mut cpuid, t.0, t.1, t.2, hypervisor.get_cpu_vendor());
-    }
 
     if let Some(sgx_epc_sections) = sgx_epc_sections {
         update_cpuid_sgx(&mut cpuid, sgx_epc_sections)?;
@@ -770,6 +765,7 @@ pub fn configure_vcpu(
     cpuid: Vec<CpuIdEntry>,
     kvm_hyperv: bool,
     cpu_vendor: CpuVendor,
+    topology: Option<(u8, u8, u8)>,
 ) -> super::Result<()> {
     // Per vCPU CPUID changes; common are handled via generate_common_cpuid()
     let mut cpuid = cpuid;
@@ -780,12 +776,20 @@ pub fn configure_vcpu(
         CpuidPatch::set_cpuid_reg(&mut cpuid, 0x8000_001e, None, CpuidReg::EAX, u32::from(id));
     }
 
+    if let Some(t) = topology {
+        update_cpuid_topology(&mut cpuid, t.0, t.1, t.2, cpu_vendor, id);
+    }
+
     // Set ApicId in cpuid for each vcpu
     // SAFETY: get host cpuid when eax=1
     let mut cpu_ebx = unsafe { core::arch::x86_64::__cpuid(1) }.ebx;
     cpu_ebx &= 0xffffff;
     cpu_ebx |= (id as u32) << 24;
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1, None, CpuidReg::EBX, cpu_ebx);
+
+    if matches!(cpu_vendor, CpuVendor::AMD) {
+        CpuidPatch::set_cpuid_reg(&mut cpuid, 0x8000_0001, None, CpuidReg::ECX, (1u32 << 1) | (1u32 << 22));
+    }
 
     // The TSC frequency CPUID leaf should not be included when running with HyperV emulation
     if !kvm_hyperv {
@@ -1176,6 +1180,7 @@ fn update_cpuid_topology(
     cores_per_die: u8,
     dies_per_package: u8,
     cpu_vendor: CpuVendor,
+    id: u8,
 ) {
     let thread_width = 8 - (threads_per_core - 1).leading_zeros();
     let core_width = (8 - (cores_per_die - 1).leading_zeros()) + thread_width;
@@ -1234,9 +1239,16 @@ fn update_cpuid_topology(
         );
         CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(2), CpuidReg::ECX, 5 << 8);
     } else if matches!(cpu_vendor, CpuVendor::AMD) {
-        CpuidPatch::set_cpuid_reg(cpuid, 0x8000_001e, None, CpuidReg::EBX, thread_width << 8);
-        CpuidPatch::set_cpuid_reg(cpuid, 0x8000_001e, None, CpuidReg::ECX, die_width << 8);
+        CpuidPatch::set_cpuid_reg(cpuid, 0x8000_001e, None, CpuidReg::EBX, ((threads_per_core as u32 - 1) << 8) | (id as u32 & 0xff));
+        CpuidPatch::set_cpuid_reg(cpuid, 0x8000_001e, None, CpuidReg::ECX, ((dies_per_package as u32 - 1) << 8) | ((id as u32 >> (thread_width + die_width)) & 0xff));
         CpuidPatch::set_cpuid_reg(cpuid, 0x8000_001e, None, CpuidReg::EDX, 0);
+        if cores_per_die * threads_per_core > 1 {
+            CpuidPatch::set_cpuid_reg(cpuid, 0x0000_0001, None, CpuidReg::EBX, ((cores_per_die * threads_per_core) as u32) << 16);
+            CpuidPatch::set_cpuid_reg(cpuid, 0x0000_0001, None, CpuidReg::EDX, 1 << 28u32);
+            CpuidPatch::set_cpuid_reg(cpuid, 0x8000_0008, None, CpuidReg::ECX, /*((thread_width * core_width) << 12) |*/ ((cores_per_die * threads_per_core) - 1) as u32);
+        } else {
+            CpuidPatch::set_cpuid_reg(cpuid, 0x8000_0008, None, CpuidReg::ECX, 0u32);
+        }
     }
 }
 

@@ -87,6 +87,7 @@ use vm_migration::{
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{register_signal_handler, SIGRTMIN};
 use zerocopy::AsBytes;
+#[cfg(target_arch = "x86_64")]
 
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 /// Extract the specified bits of a 64-bit integer.
@@ -359,6 +360,7 @@ impl Vcpu {
         boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
         #[cfg(target_arch = "x86_64")] cpuid: Vec<CpuIdEntry>,
         #[cfg(target_arch = "x86_64")] kvm_hyperv: bool,
+        #[cfg(target_arch = "x86_64")] topology: Option<(u8, u8, u8)>,
     ) -> Result<()> {
         #[cfg(target_arch = "aarch64")]
         {
@@ -375,6 +377,7 @@ impl Vcpu {
             cpuid,
             kvm_hyperv,
             self.vendor,
+            topology,
         )
         .map_err(Error::VcpuConfiguration)?;
 
@@ -728,22 +731,10 @@ impl CpuManager {
             .as_ref()
             .map(|sgx_epc_region| sgx_epc_region.epc_sections().values().cloned().collect());
 
-        let topology = self.config.topology.clone().map_or_else(
-            || {
-                #[cfg(feature = "mshv")]
-                if matches!(hypervisor.hypervisor_type(), HypervisorType::Mshv) {
-                    return Some((1, self.boot_vcpus(), 1));
-                }
-                None
-            },
-            |t| Some((t.threads_per_core, t.cores_per_die, t.dies_per_package)),
-        );
-
         self.cpuid = {
             let phys_bits = physical_bits(hypervisor, self.config.max_phys_bits);
             arch::generate_common_cpuid(
                 hypervisor,
-                topology,
                 sgx_epc_sections,
                 phys_bits,
                 self.config.kvm_hyperv,
@@ -800,8 +791,18 @@ impl CpuManager {
         #[cfg(target_arch = "x86_64")]
         assert!(!self.cpuid.is_empty());
 
+        let topology = self.config.topology.clone().map_or_else(
+            || {
+                #[cfg(feature = "mshv")]
+                if matches!(self.hypervisor_type, HypervisorType::Mshv) {
+                    return Some((1, self.boot_vcpus(), 1));
+                }
+                None
+            },
+            |t| Some((t.threads_per_core, t.cores_per_die, t.dies_per_package)),
+        );
         #[cfg(target_arch = "x86_64")]
-        vcpu.configure(boot_setup, self.cpuid.clone(), self.config.kvm_hyperv)?;
+        vcpu.configure(boot_setup, self.cpuid.clone(), self.config.kvm_hyperv, topology)?;
 
         #[cfg(target_arch = "aarch64")]
         vcpu.configure(&self.vm, boot_setup)?;

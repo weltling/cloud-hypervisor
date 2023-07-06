@@ -2420,7 +2420,6 @@ impl Snapshottable for Vm {
             arch::generate_common_cpuid(
                 &self.hypervisor,
                 None,
-                None,
                 phys_bits,
                 self.config.lock().unwrap().cpus.kvm_hyperv,
                 #[cfg(feature = "tdx")]

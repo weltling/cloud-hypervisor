@@ -87,7 +87,6 @@ use vm_migration::{
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{register_signal_handler, SIGRTMIN};
 use zerocopy::AsBytes;
-#[cfg(target_arch = "x86_64")]
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 /// Extract the specified bits of a 64-bit integer.
 /// For example, to extrace 2 bits from offset 1 (zero based) of `6u64`,
@@ -317,6 +316,7 @@ pub struct Vcpu {
     #[cfg(target_arch = "aarch64")]
     mpidr: u64,
     saved_state: Option<CpuState>,
+    #[cfg(target_arch = "x86_64")]
     vendor: CpuVendor,
 }
 
@@ -333,7 +333,7 @@ impl Vcpu {
         id: u8,
         vm: &Arc<dyn hypervisor::Vm>,
         vm_ops: Option<Arc<dyn VmOps>>,
-        cpu_vendor: CpuVendor,
+        #[cfg(target_arch = "x86_64")] cpu_vendor: CpuVendor,
     ) -> Result<Self> {
         let vcpu = vm
             .create_vcpu(id, vm_ops)
@@ -479,6 +479,7 @@ pub struct CpuManager {
     proximity_domain_per_cpu: BTreeMap<u8, u32>,
     affinity: BTreeMap<u8, Vec<u8>>,
     dynamic: bool,
+    #[cfg(target_arch = "x86_64")]
     cpu_vendor: CpuVendor,
 }
 
@@ -636,6 +637,7 @@ impl CpuManager {
         let mut vcpu_states = Vec::with_capacity(usize::from(config.max_vcpus));
         vcpu_states.resize_with(usize::from(config.max_vcpus), VcpuState::default);
         let hypervisor_type = hypervisor.hypervisor_type();
+        #[cfg(target_arch = "x86_64")]
         let cpu_vendor = hypervisor.get_cpu_vendor();
 
         #[cfg(target_arch = "x86_64")]
@@ -718,6 +720,7 @@ impl CpuManager {
             proximity_domain_per_cpu,
             affinity,
             dynamic,
+            #[cfg(target_arch = "x86_64")]
             cpu_vendor,
         })))
     }
@@ -796,6 +799,7 @@ impl CpuManager {
         #[cfg(target_arch = "x86_64")]
         assert!(!self.cpuid.is_empty());
 
+        #[cfg(target_arch = "x86_64")]
         let topology = self.config.topology.clone().map_or_else(
             || {
                 #[cfg(feature = "mshv")]

@@ -27,6 +27,9 @@ use vmm::landlock::{Landlock, LandlockError};
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::block_signal;
 
+#[cfg(feature = "otel")]
+use opentelemetry::trace::{Span, TraceContextExt, Tracer};
+
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -550,6 +553,11 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
         _ => LevelFilter::Trace,
     };
 
+    #[cfg(feature = "otel")]
+    let tracer = otel::tracer::get("main");
+    #[cfg(feature = "otel")]
+    let span = tracer.start("start_vmm");
+
     let log_file: Box<dyn std::io::Write + Send> = if let Some(ref file) =
         cmd_arguments.get_one::<String>("log-file")
     {
@@ -557,6 +565,9 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
     } else {
         Box::new(std::io::stderr())
     };
+    #[cfg(feature = "otel")]
+    let span =
+        tracer.start_with_context("log_file", &opentelemetry::Context::current_with_span(span));
 
     log::set_boxed_logger(Box::new(Logger {
         output: Mutex::new(log_file),
@@ -564,6 +575,11 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
     }))
     .map(|()| log::set_max_level(log_level))
     .map_err(Error::LoggerSetup)?;
+    #[cfg(feature = "otel")]
+    let span = tracer.start_with_context(
+        "log::set_boxed_logger",
+        &opentelemetry::Context::current_with_span(span),
+    );
 
     let (api_socket_path, api_socket_fd) =
         if let Some(socket_config) = cmd_arguments.get_one::<String>("api-socket") {
@@ -607,6 +623,11 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
     } else {
         SeccompAction::Trap
     };
+    #[cfg(feature = "otel")]
+    let span = tracer.start_with_context(
+        "setup API",
+        &opentelemetry::Context::current_with_span(span),
+    );
 
     if seccomp_action == SeccompAction::Trap {
         // SAFETY: We only using signal_hook for managing signals and only execute signal
@@ -624,6 +645,9 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
         .map_err(|e| eprintln!("Error adding SIGSYS signal handler: {e}"))
         .ok();
     }
+    #[cfg(feature = "otel")]
+    let span =
+        tracer.start_with_context("seccomp", &opentelemetry::Context::current_with_span(span));
 
     // SAFETY: Trivially safe.
     unsafe {
@@ -644,8 +668,16 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
             eprintln!("Error blocking signals: {e}");
         }
     }
+    #[cfg(feature = "otel")]
+    let span =
+        tracer.start_with_context("signals", &opentelemetry::Context::current_with_span(span));
 
     let hypervisor = hypervisor::new().map_err(Error::CreateHypervisor)?;
+    #[cfg(feature = "otel")]
+    let span = tracer.start_with_context(
+        "hypervisor",
+        &opentelemetry::Context::current_with_span(span),
+    );
 
     #[cfg(feature = "guest_debug")]
     let gdb_socket_path = if let Some(gdb_config) = cmd_arguments.get_one::<String>("gdb") {
@@ -661,6 +693,12 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
     } else {
         None
     };
+    #[cfg(feature = "otel")]
+    let span = tracer.start_with_context(
+        "gdb socket",
+        &opentelemetry::Context::current_with_span(span),
+    );
+
     #[cfg(feature = "guest_debug")]
     let debug_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::CreateDebugEventFd)?;
     #[cfg(feature = "guest_debug")]
@@ -705,6 +743,9 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
             event_monitor::set_monitor(event_monitor_file).map_err(Error::EventMonitorIo)
         })
         .transpose()?;
+    #[cfg(feature = "otel")]
+    let span =
+        tracer.start_with_context("events", &opentelemetry::Context::current_with_span(span));
 
     #[cfg(feature = "dbus_api")]
     let dbus_options = match (
@@ -732,6 +773,8 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
         (None, Some(_)) => Err(Error::MissingDBusServiceName),
         (None, None) => Ok(None),
     }?;
+    #[cfg(feature = "otel")]
+    let span = tracer.start_with_context("dbus", &opentelemetry::Context::current_with_span(span));
 
     if let Some(monitor) = event_monitor {
         vmm::start_event_monitor_thread(
@@ -743,6 +786,11 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
         )
         .map_err(Error::EventMonitorThread)?;
     }
+    #[cfg(feature = "otel")]
+    let span = tracer.start_with_context(
+        "event monitor",
+        &opentelemetry::Context::current_with_span(span),
+    );
 
     event!("vmm", "starting");
 
@@ -767,6 +815,11 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
         landlock_enable,
     )
     .map_err(Error::StartVmmThread)?;
+    #[cfg(feature = "otel")]
+    let span = tracer.start_with_context(
+        "start VMM thread",
+        &opentelemetry::Context::current_with_span(span),
+    );
 
     let r: Result<(), Error> = (|| {
         #[cfg(feature = "igvm")]
@@ -805,6 +858,13 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
 
         Ok(())
     })();
+    #[cfg(feature = "otel")]
+    let mut span = tracer.start_with_context(
+        "create VM",
+        &opentelemetry::Context::current_with_span(span),
+    );
+    #[cfg(feature = "otel")]
+    span.end();
 
     if r.is_err() {
         if let Err(e) = exit_evt.write(1) {
@@ -916,6 +976,9 @@ fn main() {
 
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
+
+    #[cfg(feature = "otel")]
+    otel::init();
 
     // Ensure all created files (.e.g sockets) are only accessible by this user
     // SAFETY: trivially safe

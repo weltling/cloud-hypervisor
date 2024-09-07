@@ -23,6 +23,7 @@ pvmemcontrol = ["devices/pvmemcontrol"]
 sev_snp = ["arch/sev_snp", "hypervisor/sev_snp", "virtio-devices/sev_snp"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 tracing = ["tracer/tracing"]
+otel = [ "otel/otel" ]
 
 [dependencies]
 acpi_tables = { git = "https://github.com/rust-vmm/acpi_tables", branch = "main" }
@@ -85,3 +86,5 @@ vm-virtio = { path = "../vm-virtio" }
 vmm-sys-util = { version = "0.12.1", features = ["with-serde"] }
 zbus = { version = "4.1.2", optional = true }
 zerocopy = { version = "0.7.35", features = ["alloc", "derive"] }
+otel = { path = "../otel" }
+opentelemetry = { version = "0.24.0", features = ["trace"] }

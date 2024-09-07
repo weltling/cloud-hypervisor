@@ -104,6 +104,9 @@ use crate::vm_config::{
 };
 use crate::{device_node, GuestRegionMmap, PciDeviceInfo, DEVICE_MANAGER_SNAPSHOT_ID};
 
+#[cfg(feature = "otel")]
+use opentelemetry::trace::{Span, TraceContextExt, Tracer};
+
 #[cfg(target_arch = "aarch64")]
 const MMIO_LEN: u64 = 0x1000;
 
@@ -982,7 +985,7 @@ fn create_mmio_allocators(
 impl DeviceManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        io_bus: Arc<Bus>,
+        #[cfg(target_arch = "x86_64")] io_bus: Arc<Bus>,
         mmio_bus: Arc<Bus>,
         vm: Arc<dyn hypervisor::Vm>,
         config: Arc<Mutex<VmConfig>>,
@@ -1000,6 +1003,11 @@ impl DeviceManager {
         dynamic: bool,
     ) -> DeviceManagerResult<Arc<Mutex<Self>>> {
         trace_scoped!("DeviceManager::new");
+
+        #[cfg(feature = "otel")]
+        let tracer = otel::tracer::get("vmm");
+        #[cfg(feature = "otel")]
+        let span = tracer.start("DeviceManager::new");
 
         let (device_tree, device_id_cnt) = if let Some(snapshot) = snapshot.as_ref() {
             let state: DeviceManagerState = snapshot.to_state().unwrap();
@@ -1062,6 +1070,7 @@ impl DeviceManager {
 
         let address_manager = Arc::new(AddressManager {
             allocator: memory_manager.lock().unwrap().allocator(),
+            #[cfg(target_arch = "x86_64")]
             io_bus,
             mmio_bus,
             vm: vm.clone(),
@@ -1239,6 +1248,11 @@ impl DeviceManager {
     ) -> DeviceManagerResult<()> {
         trace_scoped!("create_devices");
 
+        #[cfg(feature = "otel")]
+        let tracer = otel::tracer::get("vmm");
+        #[cfg(feature = "otel")]
+        let span = tracer.start("create_devices");
+
         let mut virtio_devices: Vec<MetaVirtioDevice> = Vec::new();
 
         let interrupt_controller = self.add_interrupt_controller()?;
@@ -1268,6 +1282,11 @@ impl DeviceManager {
                     .map_err(DeviceManagerError::BusError)?;
             }
         }
+        #[cfg(feature = "otel")]
+        let span = tracer.start_with_context(
+            "interrupts",
+            &opentelemetry::Context::current_with_span(span),
+        );
 
         #[cfg(target_arch = "x86_64")]
         self.add_legacy_devices(
@@ -1278,6 +1297,11 @@ impl DeviceManager {
 
         #[cfg(target_arch = "aarch64")]
         self.add_legacy_devices(&legacy_interrupt_manager)?;
+        #[cfg(feature = "otel")]
+        let span = tracer.start_with_context(
+            "legacy devices",
+            &opentelemetry::Context::current_with_span(span),
+        );
 
         {
             self.ged_notification_device = self.add_acpi_devices(
@@ -1290,6 +1314,11 @@ impl DeviceManager {
                     .map_err(DeviceManagerError::EventFd)?,
             )?;
         }
+        #[cfg(feature = "otel")]
+        let span = tracer.start_with_context(
+            "notification device",
+            &opentelemetry::Context::current_with_span(span),
+        );
 
         self.original_termios_opt = original_termios_opt;
 
@@ -1299,12 +1328,22 @@ impl DeviceManager {
             console_info,
             console_resize_pipe,
         )?;
+        #[cfg(feature = "otel")]
+        let span = tracer.start_with_context(
+            "console devices",
+            &opentelemetry::Context::current_with_span(span),
+        );
 
         if let Some(tpm) = self.config.clone().lock().unwrap().tpm.as_ref() {
             let tpm_dev = self.add_tpm_device(tpm.socket.clone())?;
             self.bus_devices
                 .push(Arc::clone(&tpm_dev) as Arc<dyn BusDeviceSync>)
         }
+        #[cfg(feature = "otel")]
+        let span = tracer.start_with_context(
+            "TPM device",
+            &opentelemetry::Context::current_with_span(span),
+        );
         self.legacy_interrupt_manager = Some(legacy_interrupt_manager);
 
         virtio_devices.append(&mut self.make_virtio_devices()?);
@@ -1312,6 +1351,11 @@ impl DeviceManager {
         self.add_pci_devices(virtio_devices.clone())?;
 
         self.virtio_devices = virtio_devices;
+        #[cfg(feature = "otel")]
+        let mut span = tracer.start_with_context(
+            "virtio devices",
+            &opentelemetry::Context::current_with_span(span),
+        );
 
         // Add pvmemcontrol if required
         #[cfg(feature = "pvmemcontrol")]
@@ -1326,7 +1370,16 @@ impl DeviceManager {
 
         if self.config.clone().lock().unwrap().pvpanic {
             self.pvpanic_device = self.add_pvpanic_device()?;
+            if cfg!(feature = "otel") {
+                span = tracer.start_with_context(
+                    "pvpanic device",
+                    &opentelemetry::Context::current_with_span(span),
+                );
+            }
         }
+
+        #[cfg(feature = "otel")]
+        span.end();
 
         Ok(())
     }

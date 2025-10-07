@@ -6,10 +6,11 @@
 
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::mem::size_of;
+use std::mem::size_of_val;
 use std::os::fd::{AsRawFd, RawFd};
 
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use vmm_sys_util::write_zeroes::WriteZeroes;
+use vmm_sys_util::write_zeroes::WriteZeroesAt;
+use zerocopy::IntoBytes;
 
 use super::RawFile;
 
@@ -25,7 +26,7 @@ impl QcowRawFile {
     /// Creates a `QcowRawFile` from the given `File`, `None` is returned if `cluster_size` is not
     /// a power of two.
     pub fn from(file: RawFile, cluster_size: u64) -> Option<Self> {
-        if !cluster_size.is_power_of_two() {
+        if cluster_size.count_ones() != 1 {
             return None;
         }
         Some(QcowRawFile {
@@ -45,11 +46,10 @@ impl QcowRawFile {
     ) -> io::Result<Vec<u64>> {
         let mut table = vec![0; count as usize];
         self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_u64_into::<BigEndian>(&mut table)?;
-        if let Some(m) = mask {
-            for ptr in &mut table {
-                *ptr &= m;
-            }
+        self.file.read_exact(table.as_mut_bytes())?;
+        let mask = mask.unwrap_or(u64::MAX);
+        for ptr in &mut table {
+            *ptr = u64::from_be(*ptr) & mask;
         }
         Ok(table)
     }
@@ -71,15 +71,16 @@ impl QcowRawFile {
         non_zero_flags: u64,
     ) -> io::Result<()> {
         self.file.seek(SeekFrom::Start(offset))?;
-        let mut buffer = BufWriter::with_capacity(std::mem::size_of_val(table), &mut self.file);
+        let mut buffer = BufWriter::with_capacity(size_of_val(table), &mut self.file);
         for addr in table {
             let val = if *addr == 0 {
                 0
             } else {
                 *addr | non_zero_flags
             };
-            buffer.write_u64::<BigEndian>(val)?;
+            buffer.write_all(&val.to_be_bytes())?;
         }
+        buffer.flush()?;
         Ok(())
     }
 
@@ -89,18 +90,22 @@ impl QcowRawFile {
         let count = self.cluster_size / size_of::<u16>() as u64;
         let mut table = vec![0; count as usize];
         self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_u16_into::<BigEndian>(&mut table)?;
+        self.file.read_exact(table.as_mut_bytes())?;
+        for refcount in &mut table {
+            *refcount = u16::from_be(*refcount);
+        }
         Ok(table)
     }
 
     /// Writes a refcount block to the file.
     pub fn write_refcount_block(&mut self, offset: u64, table: &[u16]) -> io::Result<()> {
         self.file.seek(SeekFrom::Start(offset))?;
-        let mut buffer = BufWriter::with_capacity(std::mem::size_of_val(table), &mut self.file);
+        let mut buffer = BufWriter::with_capacity(size_of_val(table), &mut self.file);
 
         for count in table {
-            buffer.write_u16::<BigEndian>(*count)?;
+            buffer.write_all(&count.to_be_bytes())?;
         }
+        buffer.flush()?;
         Ok(())
     }
 
@@ -138,8 +143,7 @@ impl QcowRawFile {
     /// Zeros out a cluster in the file.
     pub fn zero_cluster(&mut self, address: u64) -> io::Result<()> {
         let cluster_size = self.cluster_size as usize;
-        self.file.seek(SeekFrom::Start(address))?;
-        self.file.write_zeroes(cluster_size)?;
+        self.file.write_all_zeroes_at(address, cluster_size)?;
         Ok(())
     }
 

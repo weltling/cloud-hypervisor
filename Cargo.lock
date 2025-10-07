@@ -334,6 +334,7 @@ dependencies = [
  "vm-memory",
  "vm-virtio",
  "vmm-sys-util",
+ "zerocopy",
 ]
 
 [[package]]

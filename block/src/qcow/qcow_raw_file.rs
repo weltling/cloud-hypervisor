@@ -10,6 +10,7 @@ use std::os::fd::{AsRawFd, RawFd};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use vmm_sys_util::write_zeroes::WriteZeroes;
+use zerocopy::IntoBytes;
 
 use super::RawFile;
 
@@ -25,7 +26,7 @@ impl QcowRawFile {
     /// Creates a `QcowRawFile` from the given `File`, `None` is returned if `cluster_size` is not
     /// a power of two.
     pub fn from(file: RawFile, cluster_size: u64) -> Option<Self> {
-        if !cluster_size.is_power_of_two() {
+        if cluster_size.count_ones() != 1 {
             return None;
         }
         Some(QcowRawFile {
@@ -45,11 +46,10 @@ impl QcowRawFile {
     ) -> io::Result<Vec<u64>> {
         let mut table = vec![0; count as usize];
         self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_u64_into::<BigEndian>(&mut table)?;
-        if let Some(m) = mask {
-            for ptr in &mut table {
-                *ptr &= m;
-            }
+        self.file.read_exact(table.as_mut_bytes())?;
+        let mask = mask.unwrap_or(u64::MAX);
+        for ptr in &mut table {
+            *ptr = u64::from_be(*ptr) & mask;
         }
         Ok(table)
     }
@@ -80,6 +80,7 @@ impl QcowRawFile {
             };
             buffer.write_u64::<BigEndian>(val)?;
         }
+        buffer.flush()?;
         Ok(())
     }
 
@@ -101,6 +102,7 @@ impl QcowRawFile {
         for count in table {
             buffer.write_u16::<BigEndian>(*count)?;
         }
+        buffer.flush()?;
         Ok(())
     }
 

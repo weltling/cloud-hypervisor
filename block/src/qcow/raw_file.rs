@@ -122,6 +122,10 @@ impl RawFile {
     pub fn is_direct(&self) -> bool {
         self.direct_io
     }
+
+    pub fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        self.file.read_exact(buf)
+    }
 }
 
 impl Read for RawFile {

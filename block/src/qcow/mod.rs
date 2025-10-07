@@ -16,7 +16,7 @@ use std::mem::size_of;
 use std::os::fd::{AsRawFd, RawFd};
 use std::str;
 
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, ReadBytesExt};
 use libc::{EINVAL, ENOSPC, ENOTSUP};
 use remain::sorted;
 use thiserror::Error;
@@ -154,7 +154,7 @@ const L2_TABLE_OFFSET_MASK: u64 = 0x00ff_ffff_ffff_fe00;
 // Flags
 const COMPRESSED_FLAG: u64 = 1 << 62;
 const CLUSTER_USED_FLAG: u64 = 1 << 63;
-const COMPATIBLE_FEATURES_LAZY_REFCOUNTS: u64 = 1;
+const COMPATIBLE_FEATURES_LAZY_REFCOUNTS: u64 = 1 << 0;
 
 // The format supports a "header extension area", that crosvm does not use.
 const QCOW_EMPTY_HEADER_EXTENSION_SIZE: u32 = 8;
@@ -195,23 +195,34 @@ pub struct QcowHeader {
     pub backing_file_path: Option<String>,
 }
 
+// Reads the next u16 from the file.
+fn read_u16_from_file(f: &mut RawFile) -> Result<u16> {
+    let mut value = [0u8; 2];
+    f.read_exact(&mut value).map_err(Error::ReadingHeader)?;
+    Ok(u16::from_be_bytes(value))
+}
+
+// Reads the next u32 from the file.
+fn read_u32_from_file(f: &mut RawFile) -> Result<u32> {
+    let mut value = [0u8; 4];
+    f.read_exact(&mut value).map_err(Error::ReadingHeader)?;
+    Ok(u32::from_be_bytes(value))
+}
+
+// Reads the next u64 from the file.
+fn read_u64_from_file(f: &mut RawFile) -> Result<u64> {
+    let mut value = [0u8; 8];
+    f.read_exact(&mut value).map_err(Error::ReadingHeader)?;
+    Ok(u64::from_be_bytes(value))
+}
+
 impl QcowHeader {
     /// Creates a QcowHeader from a reference to a file.
     pub fn new(f: &mut RawFile) -> Result<QcowHeader> {
-        f.rewind().map_err(Error::ReadingHeader)?;
+        f.seek(SeekFrom::Start(0)).map_err(Error::ReadingHeader)?;
         let magic = f.read_u32::<BigEndian>().map_err(Error::ReadingHeader)?;
         if magic != QCOW_MAGIC {
             return Err(Error::InvalidMagic);
-        }
-
-        // Reads the next u32 from the file.
-        fn read_u32_from_file(f: &mut RawFile) -> Result<u32> {
-            f.read_u32::<BigEndian>().map_err(Error::ReadingHeader)
-        }
-
-        // Reads the next u64 from the file.
-        fn read_u64_from_file(f: &mut RawFile) -> Result<u64> {
-            f.read_u64::<BigEndian>().map_err(Error::ReadingHeader)
         }
 
         let version = read_u32_from_file(f)?;
@@ -287,18 +298,17 @@ impl QcowHeader {
         let cluster_bits: u32 = DEFAULT_CLUSTER_BITS;
         let cluster_size: u32 = 0x01 << cluster_bits;
         let max_length: usize = (cluster_size - header_size) as usize;
-        if let Some(path) = backing_file
-            && path.len() > max_length
-        {
-            return Err(Error::BackingFileTooLong(path.len() - max_length));
+        if let Some(path) = backing_file {
+            if path.len() > max_length {
+                return Err(Error::BackingFileTooLong(path.len() - max_length));
+            }
         }
-
         // L2 blocks are always one cluster long. They contain cluster_size/sizeof(u64) addresses.
-        let entries_per_cluster: u32 = cluster_size / size_of::<u64>() as u32;
-        let num_clusters: u32 = div_round_up_u64(size, u64::from(cluster_size)) as u32;
-        let num_l2_clusters: u32 = div_round_up_u32(num_clusters, entries_per_cluster);
-        let l1_clusters: u32 = div_round_up_u32(num_l2_clusters, entries_per_cluster);
-        let header_clusters = div_round_up_u32(size_of::<QcowHeader>() as u32, cluster_size);
+        let l2_size: u32 = cluster_size / size_of::<u64>() as u32;
+        let num_clusters: u32 = size.div_ceil(u64::from(cluster_size)) as u32;
+        let num_l2_clusters: u32 = num_clusters.div_ceil(l2_size);
+        let l1_clusters: u32 = num_l2_clusters.div_ceil(cluster_size);
+        let header_clusters = (size_of::<QcowHeader>() as u32).div_ceil(cluster_size);
         Ok(QcowHeader {
             magic: QCOW_MAGIC,
             version,
@@ -325,10 +335,7 @@ impl QcowHeader {
                     num_clusters + l1_clusters + num_l2_clusters + header_clusters,
                 ) as u32;
                 // The refcount table needs to store the offset of each refcount cluster.
-                div_round_up_u32(
-                    max_refcount_clusters * size_of::<u64>() as u32,
-                    cluster_size,
-                )
+                (max_refcount_clusters * size_of::<u64>() as u32).div_ceil(cluster_size)
             },
             nb_snapshots: 0,
             snapshots_offset: 0,
@@ -345,13 +352,13 @@ impl QcowHeader {
     pub fn write_to<F: Write + Seek>(&self, file: &mut F) -> Result<()> {
         // Writes the next u32 to the file.
         fn write_u32_to_file<F: Write>(f: &mut F, value: u32) -> Result<()> {
-            f.write_u32::<BigEndian>(value)
+            f.write_all(&value.to_be_bytes())
                 .map_err(Error::WritingHeader)
         }
 
         // Writes the next u64 to the file.
         fn write_u64_to_file<F: Write>(f: &mut F, value: u64) -> Result<()> {
-            f.write_u64::<BigEndian>(value)
+            f.write_all(&value.to_be_bytes())
                 .map_err(Error::WritingHeader)
         }
 
@@ -380,7 +387,7 @@ impl QcowHeader {
         }
 
         if let Some(backing_file_path) = self.backing_file_path.as_ref() {
-            write!(file, "{backing_file_path}").map_err(Error::WritingHeader)?;
+            write!(file, "{}", backing_file_path).map_err(Error::WritingHeader)?;
         }
 
         // Set the file length by seeking and writing a zero to the last byte. This avoids needing
@@ -400,12 +407,9 @@ impl QcowHeader {
 
 fn max_refcount_clusters(refcount_order: u32, cluster_size: u32, num_clusters: u32) -> u64 {
     // Use u64 as the product of the u32 inputs can overflow.
-    let refcount_bytes = (0x01 << u64::from(refcount_order)) / 8;
-    let for_data = div_round_up_u64(
-        u64::from(num_clusters) * refcount_bytes,
-        u64::from(cluster_size),
-    );
-    let for_refcounts = div_round_up_u64(for_data * refcount_bytes, u64::from(cluster_size));
+    let refcount_bytes = (0x01 << refcount_order as u64) / 8;
+    let for_data = (u64::from(num_clusters) * refcount_bytes).div_ceil(u64::from(cluster_size));
+    let for_refcounts = (for_data * refcount_bytes).div_ceil(u64::from(cluster_size));
     for_data + for_refcounts
 }
 
@@ -524,12 +528,11 @@ impl QcowFile {
         let mut refcount_rebuild_required = true;
         file.seek(SeekFrom::Start(header.refcount_table_offset))
             .map_err(Error::SeekingFile)?;
-        let first_refblock_addr = file.read_u64::<BigEndian>().map_err(Error::ReadingHeader)?;
+        let first_refblock_addr = read_u64_from_file(&mut file)?;
         if first_refblock_addr != 0 {
             file.seek(SeekFrom::Start(first_refblock_addr))
                 .map_err(Error::SeekingFile)?;
-            let first_cluster_refcount =
-                file.read_u16::<BigEndian>().map_err(Error::ReadingHeader)?;
+            let first_cluster_refcount = read_u16_from_file(&mut file)?;
             if first_cluster_refcount != 0 {
                 refcount_rebuild_required = false;
             }
@@ -545,11 +548,11 @@ impl QcowFile {
             QcowFile::rebuild_refcounts(&mut raw_file, header.clone())?;
         }
 
-        let entries_per_cluster = cluster_size / size_of::<u64>() as u64;
-        let num_clusters = div_round_up_u64(header.size, cluster_size);
-        let num_l2_clusters = div_round_up_u64(num_clusters, entries_per_cluster);
-        let l1_clusters = div_round_up_u64(num_l2_clusters, entries_per_cluster);
-        let header_clusters = div_round_up_u64(size_of::<QcowHeader>() as u64, cluster_size);
+        let l2_size = cluster_size / size_of::<u64>() as u64;
+        let num_clusters = header.size.div_ceil(cluster_size);
+        let num_l2_clusters = num_clusters.div_ceil(l2_size);
+        let l1_clusters = num_l2_clusters.div_ceil(cluster_size);
+        let header_clusters = (size_of::<QcowHeader>() as u64).div_ceil(cluster_size);
         if num_l2_clusters > MAX_RAM_POINTER_TABLE_SIZE {
             return Err(Error::TooManyL1Entries(num_l2_clusters));
         }
@@ -563,7 +566,7 @@ impl QcowFile {
                 .map_err(Error::ReadingHeader)?,
         );
 
-        let num_clusters = div_round_up_u64(header.size, cluster_size);
+        let num_clusters = header.size.div_ceil(cluster_size);
         let refcount_clusters = max_refcount_clusters(
             header.refcount_order,
             cluster_size as u32,
@@ -808,8 +811,7 @@ impl QcowFile {
             header: QcowHeader,
             cluster_size: u64,
         ) -> Result<()> {
-            let entries_per_cluster = cluster_size / size_of::<u64>() as u64;
-            let l1_clusters = div_round_up_u64(u64::from(header.l1_size), entries_per_cluster);
+            let l1_clusters = u64::from(header.l1_size).div_ceil(cluster_size);
             let l1_table_offset = header.l1_table_offset;
             for i in 0..l1_clusters {
                 add_ref(refcounts, cluster_size, l1_table_offset + i * cluster_size)?;
@@ -827,7 +829,7 @@ impl QcowFile {
             let l1_table = raw_file
                 .read_pointer_table(
                     header.l1_table_offset,
-                    u64::from(header.l1_size),
+                    header.l1_size as u64,
                     Some(L1_TABLE_OFFSET_MASK),
                 )
                 .map_err(Error::ReadingPointers)?;
@@ -863,7 +865,7 @@ impl QcowFile {
             cluster_size: u64,
         ) -> Result<()> {
             let refcount_table_offset = header.refcount_table_offset;
-            for i in 0..u64::from(header.refcount_table_clusters) {
+            for i in 0..header.refcount_table_clusters as u64 {
                 add_ref(
                     refcounts,
                     cluster_size,
@@ -880,8 +882,10 @@ impl QcowFile {
             refcounts: &mut [u16],
             cluster_size: u64,
             refblock_clusters: u64,
+            pointers_per_cluster: u64,
         ) -> Result<Vec<u64>> {
-            let mut ref_table = vec![0; refblock_clusters as usize];
+            let refcount_table_entries = refblock_clusters.div_ceil(pointers_per_cluster);
+            let mut ref_table = vec![0; refcount_table_entries as usize];
             let mut first_free_cluster: u64 = 0;
             for refblock_addr in &mut ref_table {
                 loop {
@@ -913,7 +917,10 @@ impl QcowFile {
         ) -> Result<()> {
             // Rewrite the header with lazy refcounts enabled while we are rebuilding the tables.
             header.compatible_features |= COMPATIBLE_FEATURES_LAZY_REFCOUNTS;
-            raw_file.file_mut().rewind().map_err(Error::SeekingFile)?;
+            raw_file
+                .file_mut()
+                .seek(SeekFrom::Start(0))
+                .map_err(Error::SeekingFile)?;
             header.write_to(raw_file.file_mut())?;
 
             for (i, refblock_addr) in ref_table.iter().enumerate() {
@@ -948,7 +955,10 @@ impl QcowFile {
 
             // Rewrite the header again, now with lazy refcounts disabled.
             header.compatible_features &= !COMPATIBLE_FEATURES_LAZY_REFCOUNTS;
-            raw_file.file_mut().rewind().map_err(Error::SeekingFile)?;
+            raw_file
+                .file_mut()
+                .seek(SeekFrom::Start(0))
+                .map_err(Error::SeekingFile)?;
             header.write_to(raw_file.file_mut())?;
 
             Ok(())
@@ -963,24 +973,21 @@ impl QcowFile {
             .len();
 
         let refcount_bits = 1u64 << header.refcount_order;
-        let refcount_bytes = div_round_up_u64(refcount_bits, 8);
+        let refcount_bytes = refcount_bits.div_ceil(8);
         let refcount_block_entries = cluster_size / refcount_bytes;
         let pointers_per_cluster = cluster_size / size_of::<u64>() as u64;
-        let data_clusters = div_round_up_u64(header.size, cluster_size);
-        let l2_clusters = div_round_up_u64(data_clusters, pointers_per_cluster);
-        let l1_clusters = div_round_up_u64(l2_clusters, pointers_per_cluster);
-        let header_clusters = div_round_up_u64(size_of::<QcowHeader>() as u64, cluster_size);
+        let data_clusters = header.size.div_ceil(cluster_size);
+        let l2_clusters = data_clusters.div_ceil(pointers_per_cluster);
+        let l1_clusters = l2_clusters.div_ceil(cluster_size);
+        let header_clusters = (size_of::<QcowHeader>() as u64).div_ceil(cluster_size);
         let max_clusters = data_clusters + l2_clusters + l1_clusters + header_clusters;
         let mut max_valid_cluster_index = max_clusters;
-        let refblock_clusters = div_round_up_u64(max_valid_cluster_index, refcount_block_entries);
-        let reftable_clusters = div_round_up_u64(refblock_clusters, pointers_per_cluster);
+        let refblock_clusters = max_valid_cluster_index.div_ceil(refcount_block_entries);
+        let reftable_clusters = refblock_clusters.div_ceil(pointers_per_cluster);
         // Account for refblocks and the ref table size needed to address them.
-        let refblocks_for_refs = div_round_up_u64(
-            refblock_clusters + reftable_clusters,
-            refcount_block_entries,
-        );
-        let reftable_clusters_for_refs =
-            div_round_up_u64(refblocks_for_refs, refcount_block_entries);
+        let refblocks_for_refs =
+            (refblock_clusters + reftable_clusters).div_ceil(refcount_block_entries);
+        let reftable_clusters_for_refs = refblocks_for_refs.div_ceil(refcount_block_entries);
         max_valid_cluster_index += refblock_clusters + reftable_clusters;
         max_valid_cluster_index += refblocks_for_refs + reftable_clusters_for_refs;
 
@@ -1002,7 +1009,12 @@ impl QcowFile {
         set_refcount_table_refcounts(&mut refcounts, header.clone(), cluster_size)?;
 
         // Allocate clusters to store the new reference count blocks.
-        let ref_table = alloc_refblocks(&mut refcounts, cluster_size, refblock_clusters)?;
+        let ref_table = alloc_refblocks(
+            &mut refcounts,
+            cluster_size,
+            refblock_clusters,
+            pointers_per_cluster,
+        )?;
 
         // Write updated reference counts and point the reftable at them.
         write_refblocks(
@@ -1376,9 +1388,10 @@ impl QcowFile {
         Ok(())
     }
 
-    // Deallocate the storage for `length` bytes starting at `address`.
+    // Fill a range of `length` bytes starting at `address` with zeroes.
     // Any future reads of this range will return all zeroes.
-    fn deallocate_bytes(&mut self, address: u64, length: usize) -> std::io::Result<()> {
+    // If there is no backing file, this will deallocate cluster storage when possible.
+    fn zero_bytes(&mut self, address: u64, length: usize) -> std::io::Result<()> {
         let write_count: usize = self.limit_range_file(address, length);
 
         let mut nwritten: usize = 0;
@@ -1386,14 +1399,22 @@ impl QcowFile {
             let curr_addr = address + nwritten as u64;
             let count = self.limit_range_cluster(curr_addr, write_count - nwritten);
 
-            if count == self.raw_file.cluster_size() as usize {
-                // Full cluster - deallocate the storage.
+            if self.backing_file.is_none() && count == self.raw_file.cluster_size() as usize {
+                // Full cluster and no backing file in use - deallocate the storage.
                 self.deallocate_cluster(curr_addr)?;
             } else {
-                // Partial cluster - zero out the relevant bytes if it was allocated.
-                // Any space in unallocated clusters can be left alone, since
-                // unallocated clusters already read back as zeroes.
-                if let Some(offset) = self.file_offset_read(curr_addr)? {
+                // Partial cluster - zero out the relevant bytes.
+                let offset = if self.backing_file.is_some() {
+                    // There is a backing file, so we need to allocate a cluster in order to
+                    // zero out the hole-punched bytes such that the backing file contents do not
+                    // show through.
+                    Some(self.file_offset_write(curr_addr)?)
+                } else {
+                    // Any space in unallocated clusters can be left alone, since
+                    // unallocated clusters already read back as zeroes.
+                    self.file_offset_read(curr_addr)?
+                };
+                if let Some(offset) = offset {
                     // Partial cluster - zero it out.
                     self.raw_file.file_mut().write_zeroes_at(offset, count)?;
                 }
@@ -1497,17 +1518,16 @@ impl QcowFile {
 
         // Push L1 table and refcount table last as all the clusters they point to are now
         // guaranteed to be valid.
-        let mut sync_required = if self.l1_table.dirty() {
+        let mut sync_required = false;
+        if self.l1_table.dirty() {
             self.raw_file.write_pointer_table(
                 self.header.l1_table_offset,
                 self.l1_table.get_values(),
                 0,
             )?;
             self.l1_table.mark_clean();
-            true
-        } else {
-            false
-        };
+            sync_required = true;
+        }
         sync_required |= self.refcounts.flush_table(&mut self.raw_file)?;
         if sync_required {
             self.raw_file.file_mut().sync_data()?;
@@ -1625,13 +1645,17 @@ impl Write for QcowFile {
 
 impl FileSync for QcowFile {
     fn fsync(&mut self) -> std::io::Result<()> {
-        self.flush()
+        self.sync_caches()?;
+        let unref_clusters = std::mem::take(&mut self.unref_clusters);
+        self.avail_clusters.extend(unref_clusters);
+        Ok(())
     }
 }
 
 impl FileSetLen for QcowFile {
     fn set_len(&self, _len: u64) -> std::io::Result<()> {
-        Err(std::io::Error::other(
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
             "set_len() not supported for QcowFile",
         ))
     }
@@ -1643,7 +1667,7 @@ impl PunchHole for QcowFile {
         let mut offset = offset;
         while remaining > 0 {
             let chunk_length = min(remaining, usize::MAX as u64) as usize;
-            self.deallocate_bytes(offset, chunk_length)?;
+            self.zero_bytes(offset, chunk_length)?;
             remaining -= chunk_length as u64;
             offset += chunk_length as u64;
         }
@@ -1700,16 +1724,6 @@ fn offset_is_cluster_boundary(offset: u64, cluster_bits: u32) -> Result<()> {
         return Err(Error::InvalidOffset(offset));
     }
     Ok(())
-}
-
-// Ceiling of the division of `dividend`/`divisor`.
-fn div_round_up_u64(dividend: u64, divisor: u64) -> u64 {
-    dividend / divisor + u64::from(!dividend.is_multiple_of(divisor))
-}
-
-// Ceiling of the division of `dividend`/`divisor`.
-fn div_round_up_u32(dividend: u32, divisor: u32) -> u32 {
-    dividend / divisor + u32::from(!dividend.is_multiple_of(divisor))
 }
 
 fn convert_copy<R, W>(reader: &mut R, writer: &mut W, offset: u64, size: u64) -> Result<()>

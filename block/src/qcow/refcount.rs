@@ -100,7 +100,7 @@ impl RefCount {
         let block_addr_disk = *self.ref_table.get(table_index).ok_or(Error::InvalidIndex)?;
 
         // Fill the cache if this block isn't yet there.
-        if !self.refblock_cache.contains_key(table_index) {
+        if !self.refblock_cache.contains_key(&table_index) {
             // Need a new cluster
             if let Some((addr, table)) = new_cluster.take() {
                 self.ref_table[table_index] = addr;
@@ -119,7 +119,7 @@ impl RefCount {
         }
 
         // Unwrap is safe here as the entry was filled directly above.
-        let dropped_cluster = if !self.refblock_cache.get(table_index).unwrap().dirty() {
+        let dropped_cluster = if !self.refblock_cache.get(&table_index).unwrap().dirty() {
             // Free the previously used block and use a new one. Writing modified counts to new
             // blocks keeps the on-disk state consistent even if it's out of date.
             if let Some((addr, _)) = new_cluster.take() {
@@ -132,7 +132,7 @@ impl RefCount {
             None
         };
 
-        self.refblock_cache.get_mut(table_index).unwrap()[block_index] = refcount;
+        self.refblock_cache.get_mut(&table_index).unwrap()[block_index] = refcount;
         Ok(dropped_cluster)
     }
 
@@ -179,7 +179,7 @@ impl RefCount {
         if block_addr_disk == 0 {
             return Ok(0);
         }
-        if !self.refblock_cache.contains_key(table_index) {
+        if !self.refblock_cache.contains_key(&table_index) {
             let table = VecCache::from_vec(
                 raw_file
                     .read_refcount_block(block_addr_disk)
@@ -192,7 +192,7 @@ impl RefCount {
                 })
                 .map_err(Error::EvictingRefCounts)?;
         }
-        Ok(self.refblock_cache.get(table_index).unwrap()[block_index])
+        Ok(self.refblock_cache.get(&table_index).unwrap()[block_index])
     }
 
     /// Returns the refcount table for this file. This is only useful for debugging.
@@ -210,7 +210,7 @@ impl RefCount {
         if block_addr_disk == 0 {
             return Ok(None);
         }
-        if !self.refblock_cache.contains_key(table_index) {
+        if !self.refblock_cache.contains_key(&table_index) {
             let table = VecCache::from_vec(
                 raw_file
                     .read_refcount_block(block_addr_disk)
@@ -226,7 +226,7 @@ impl RefCount {
         }
         // The index must exist as it was just inserted if it didn't already.
         Ok(Some(
-            self.refblock_cache.get(table_index).unwrap().get_values(),
+            self.refblock_cache.get(&table_index).unwrap().get_values(),
         ))
     }
 

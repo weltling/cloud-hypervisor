@@ -99,16 +99,16 @@ impl<T: Cacheable> CacheMap<T> {
         }
     }
 
-    pub fn contains_key(&self, key: usize) -> bool {
-        self.map.contains_key(&key)
+    pub fn contains_key(&self, key: &usize) -> bool {
+        self.map.contains_key(key)
     }
 
-    pub fn get(&self, index: usize) -> Option<&T> {
-        self.map.get(&index)
+    pub fn get(&self, index: &usize) -> Option<&T> {
+        self.map.get(index)
     }
 
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        self.map.get_mut(&index)
+    pub fn get_mut(&mut self, index: &usize) -> Option<&mut T> {
+        self.map.get_mut(index)
     }
 
     pub fn iter_mut(&mut self) -> IterMut<'_, usize, T> {

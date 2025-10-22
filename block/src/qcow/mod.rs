@@ -707,7 +707,7 @@ impl QcowFile {
             return Ok(None);
         }
 
-        if !self.l2_cache.contains_key(l1_index) {
+        if !self.l2_cache.contains_key(&l1_index) {
             // Not in the cache.
             let table = VecCache::from_vec(
                 Self::read_l2_cluster(&mut self.raw_file, l2_addr_disk)
@@ -727,7 +727,7 @@ impl QcowFile {
         }
 
         // The index must exist as it was just inserted if it didn't already.
-        Ok(Some(self.l2_cache.get(l1_index).unwrap().get_values()))
+        Ok(Some(self.l2_cache.get(&l1_index).unwrap().get_values()))
     }
 
     /// Returns the refcount table for this file. This is only useful for debugging.
@@ -1082,7 +1082,7 @@ impl QcowFile {
 
         let l2_index = self.l2_table_index(address) as usize;
 
-        if !self.l2_cache.contains_key(l1_index) {
+        if !self.l2_cache.contains_key(&l1_index) {
             // Not in the cache.
             let table =
                 VecCache::from_vec(Self::read_l2_cluster(&mut self.raw_file, l2_addr_disk)?);
@@ -1098,7 +1098,7 @@ impl QcowFile {
             })?;
         };
 
-        let cluster_addr = self.l2_cache.get(l1_index).unwrap()[l2_index];
+        let cluster_addr = self.l2_cache.get(&l1_index).unwrap()[l2_index];
         if cluster_addr == 0 {
             return Ok(None);
         }
@@ -1121,7 +1121,7 @@ impl QcowFile {
 
         let mut set_refcounts = Vec::new();
 
-        if !self.l2_cache.contains_key(l1_index) {
+        if !self.l2_cache.contains_key(&l1_index) {
             // Not in the cache.
             let l2_table = if l2_addr_disk == 0 {
                 // Allocate a new cluster to store the L2 table and update the L1 table to point
@@ -1145,7 +1145,7 @@ impl QcowFile {
             })?;
         }
 
-        let cluster_addr = match self.l2_cache.get(l1_index).unwrap()[l2_index] {
+        let cluster_addr = match self.l2_cache.get(&l1_index).unwrap()[l2_index] {
             0 => {
                 let initial_data = if let Some(backing) = self.backing_file.as_mut() {
                     let cluster_size = self.raw_file.cluster_size();
@@ -1181,7 +1181,7 @@ impl QcowFile {
         cluster_addr: u64,
         set_refcounts: &mut Vec<(u64, u16)>,
     ) -> io::Result<()> {
-        if !self.l2_cache.get(l1_index).unwrap().dirty() {
+        if !self.l2_cache.get(&l1_index).unwrap().dirty() {
             // Free the previously used cluster if one exists. Modified tables are always
             // witten to new clusters so the L1 table can be committed to disk after they
             // are and L1 never points at an invalid table.
@@ -1202,7 +1202,7 @@ impl QcowFile {
             self.l1_table[l1_index] = new_addr;
         }
         // 'unwrap' is OK because it was just added.
-        self.l2_cache.get_mut(l1_index).unwrap()[l2_index] = cluster_addr;
+        self.l2_cache.get_mut(&l1_index).unwrap()[l2_index] = cluster_addr;
         Ok(())
     }
 
@@ -1259,7 +1259,7 @@ impl QcowFile {
             return Ok(false);
         }
 
-        if !self.l2_cache.contains_key(l1_index) {
+        if !self.l2_cache.contains_key(&l1_index) {
             // Not in the cache.
             let table =
                 VecCache::from_vec(Self::read_l2_cluster(&mut self.raw_file, l2_addr_disk)?);
@@ -1274,7 +1274,7 @@ impl QcowFile {
             })?;
         }
 
-        let cluster_addr = self.l2_cache.get(l1_index).unwrap()[l2_index];
+        let cluster_addr = self.l2_cache.get(&l1_index).unwrap()[l2_index];
         // If cluster_addr != 0, the cluster is allocated.
         Ok(cluster_addr != 0)
     }
@@ -1331,7 +1331,7 @@ impl QcowFile {
             return Ok(());
         }
 
-        if !self.l2_cache.contains_key(l1_index) {
+        if !self.l2_cache.contains_key(&l1_index) {
             // Not in the cache.
             let table =
                 VecCache::from_vec(Self::read_l2_cluster(&mut self.raw_file, l2_addr_disk)?);
@@ -1346,7 +1346,7 @@ impl QcowFile {
             })?;
         }
 
-        let cluster_addr = self.l2_cache.get(l1_index).unwrap()[l2_index];
+        let cluster_addr = self.l2_cache.get(&l1_index).unwrap()[l2_index];
         if cluster_addr == 0 {
             // This cluster is already unallocated; nothing to do.
             return Ok(());
@@ -1372,7 +1372,7 @@ impl QcowFile {
 
         // Rewrite the L2 entry to remove the cluster mapping.
         // unwrap is safe as we just checked/inserted this entry.
-        self.l2_cache.get_mut(l1_index).unwrap()[l2_index] = 0;
+        self.l2_cache.get_mut(&l1_index).unwrap()[l2_index] = 0;
 
         if new_refcount == 0 {
             let cluster_size = self.raw_file.cluster_size();

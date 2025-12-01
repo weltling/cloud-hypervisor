@@ -173,6 +173,11 @@ const COMPATIBLE_FEATURES_LAZY_REFCOUNTS: u64 = 1;
 const COMPRESSION_TYPE_ZLIB: u64 = 0; // zlib/deflate <https://www.ietf.org/rfc/rfc1951.txt>
 const COMPRESSION_TYPE_ZSTD: u64 = 1; // zstd <http://github.com/facebook/zstd>
 
+// Header extension types
+const HEADER_EXT_END: u32 = 0x00000000;
+const HEADER_EXT_BACKING_FORMAT: u32 = 0xe2792aca;
+
+// The format supports a "header extension area"
 const QCOW_EMPTY_HEADER_EXTENSION_SIZE: u32 = 8;
 
 // Defined by the specification
@@ -249,6 +254,49 @@ pub struct QcowHeader {
 }
 
 impl QcowHeader {
+    /// Parse header extensions from a v3 QCOW file.
+    fn read_header_extensions(f: &mut RawFile, header: &mut QcowHeader) -> Result<()> {
+        // Seek to end of bare v3 header where extensions start
+        f.seek(SeekFrom::Start(V3_BARE_HEADER_SIZE as u64))
+            .map_err(Error::ReadingHeader)?;
+
+        // Parse header extensions
+        loop {
+            let ext_type = f.read_u32::<BigEndian>().map_err(Error::ReadingHeader)?;
+            if ext_type == HEADER_EXT_END {
+                break;
+            }
+
+            let ext_length = f.read_u32::<BigEndian>().map_err(Error::ReadingHeader)?;
+
+            match ext_type {
+                HEADER_EXT_BACKING_FORMAT => {
+                    let mut format_bytes = vec![0u8; ext_length as usize];
+                    f.read_exact(&mut format_bytes)
+                        .map_err(Error::ReadingHeader)?;
+                    header.backing_file_format = Some(
+                        String::from_utf8(format_bytes)
+                            .map_err(|err| Error::InvalidBackingFileName(err.utf8_error()))?,
+                    );
+                }
+                _ => {
+                    // Skip unknown extension
+                    f.seek(SeekFrom::Current(ext_length as i64))
+                        .map_err(Error::ReadingHeader)?;
+                }
+            }
+
+            // Skip padding to 8-byte boundary
+            let padding = (8 - (ext_length % 8)) % 8;
+            if padding > 0 {
+                f.seek(SeekFrom::Current(padding as i64))
+                    .map_err(Error::ReadingHeader)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Creates a QcowHeader from a reference to a file.
     pub fn new(f: &mut RawFile) -> Result<QcowHeader> {
         f.rewind().map_err(Error::ReadingHeader)?;
@@ -336,6 +384,12 @@ impl QcowHeader {
                     .map_err(|err| Error::InvalidBackingFileName(err.utf8_error()))?,
             );
         }
+
+        // Read header extensions (v3 only, and only if there are extensions)
+        if version == 3 && header.header_size > V3_BARE_HEADER_SIZE {
+            Self::read_header_extensions(f, &mut header)?;
+        }
+
         Ok(header)
     }
 
@@ -546,16 +600,16 @@ impl BackingFile {
                 if max_nesting_depth == 0 {
                     return Err(Error::MaxNestingDepthExceeded);
                 }
-                let backing_qcow = QcowFile::from_with_nesting_depth(
-                    raw_file,
-                    max_nesting_depth - 1,
-                )
-                .map_err(|e| Error::BackingFileOpen(Box::new(e)))?;
+                let backing_qcow =
+                    QcowFile::from_with_nesting_depth(raw_file, max_nesting_depth - 1)
+                        .map_err(|e| Error::BackingFileOpen(Box::new(e)))?;
                 Ok(Some(Self {
                     inner: Box::new(backing_qcow),
                 }))
             }
-            _ => Err(Error::UnsupportedBackingFileFormat(backing_format.to_string())),
+            _ => Err(Error::UnsupportedBackingFileFormat(
+                backing_format.to_string(),
+            )),
         }
     }
 
@@ -787,8 +841,11 @@ impl QcowFile {
         backing_file_name: &str,
         backing_file_size: u64,
     ) -> Result<QcowFile> {
-        let mut header =
-            QcowHeader::create_for_size_and_path(version, backing_file_size, Some(backing_file_name))?;
+        let mut header = QcowHeader::create_for_size_and_path(
+            version,
+            backing_file_size,
+            Some(backing_file_name),
+        )?;
         header.backing_file_format = Some("qcow2".to_string());
         QcowFile::new_from_header(file, &header)
         // backing_file is loaded by new_from_header -> Self::from() based on the header
@@ -831,8 +888,11 @@ impl QcowFile {
         backing_file_name: &str,
         backing_file_size: u64,
     ) -> Result<QcowFile> {
-        let mut header =
-            QcowHeader::create_for_size_and_path(version, backing_file_size, Some(backing_file_name))?;
+        let mut header = QcowHeader::create_for_size_and_path(
+            version,
+            backing_file_size,
+            Some(backing_file_name),
+        )?;
         header.backing_file_format = Some("raw".to_string());
         QcowFile::new_from_header(file, &header)
         // backing_file is loaded by new_from_header -> Self::from() based on the header

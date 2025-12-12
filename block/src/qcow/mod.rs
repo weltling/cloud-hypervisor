@@ -424,11 +424,16 @@ impl QcowHeader {
         Ok(QcowHeader {
             magic: QCOW_MAGIC,
             version,
-            backing_file_offset: (if backing_file.is_none() {
-                0
-            } else {
-                header_size
-            }) as u64,
+            backing_file_offset: backing_file
+                .map(|_| {
+                    header_size
+                        + if version == 3 {
+                            QCOW_EMPTY_HEADER_EXTENSION_SIZE
+                        } else {
+                            0
+                        }
+                })
+                .unwrap_or(0) as u64,
             backing_file_size: backing_file.map_or(0, |x| x.len()) as u32,
             cluster_bits: DEFAULT_CLUSTER_BITS,
             size,
@@ -499,11 +504,23 @@ impl QcowHeader {
             write_u64_to_file(file, self.autoclear_features)?;
             write_u32_to_file(file, self.refcount_order)?;
             write_u32_to_file(file, self.header_size)?;
+
+            // Write compression_type field (bytes 104-111) for v3 extended headers
+            if self.header_size > V3_BARE_HEADER_SIZE {
+                write_u64_to_file(file, 0)?; // compression_type = 0 (no compression)
+            }
+
+            // Write header extension end marker at header_size offset
             write_u32_to_file(file, 0)?; // header extension type: end of header extension area
             write_u32_to_file(file, 0)?; // length of header extension data: 0
         }
 
         if let Some(backing_file_path) = self.backing_file_path.as_ref() {
+            // Seek to backing_file_offset before writing backing file path
+            if self.backing_file_offset > 0 {
+                file.seek(SeekFrom::Start(self.backing_file_offset))
+                    .map_err(Error::WritingHeader)?;
+            }
             write!(file, "{backing_file_path}").map_err(Error::WritingHeader)?;
         }
 

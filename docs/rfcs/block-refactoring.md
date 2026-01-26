@@ -15,6 +15,10 @@
   - [Practices from Crosvm](#practices-from-crosvm)
   - [QCOW2 Specification Gaps](#qcow2-specification-gaps)
   - [Async I/O Considerations](#async-io-considerations)
+    - [Current Async I/O Architecture (RAW Format)](#current-async-io-architecture-raw-format)
+    - [Current Architecture Blocks Async for QCOW2](#current-architecture-blocks-async-for-qcow2)
+    - [What Async I/O Enables](#what-async-io-enables)
+    - [QCOW2-Specific Async Challenges](#qcow2-specific-async-challenges)
   - [Dependencies Between Improvements](#dependencies-between-improvements)
 - [Phased Refactoring Plan](#phased-refactoring-plan)
   - [Phase 1: Foundation](#phase-1-foundation)
@@ -171,9 +175,38 @@ implementation. Other unimplemented features may exist but are not covered here.
 
 ### Async I/O Considerations
 
-**Current Architecture Blocks Async**
+**Current Async I/O Architecture (RAW Format)**
 
-Multiple fundamental issues prevent async I/O:
+Cloud Hypervisor has a working async I/O implementation for RAW format using io_uring. Understanding this architecture is essential for extending it to QCOW2:
+
+**Submission Path** ([block/src/raw_async.rs](../../block/src/raw_async.rs)):
+1. Virtio-blk layer calls `read_vectored()` or `write_vectored()`
+2. I/O operation pushed to io_uring submission queue with `user_data` (descriptor index)
+3. `submit()` returns immediately - operation executes asynchronously in kernel
+4. Multiple operations can be submitted before any complete (parallelism)
+
+**Completion Path** ([virtio-devices/src/block.rs](../../virtio-devices/src/block.rs)):
+1. Epoll notifies when completions are ready
+2. `process_queue_complete()` polls completion queue via `next_completed_request()`
+3. Finds inflight request using `user_data` as key
+4. Calls `complete_async()` to finalize request (copy aligned buffers, etc.)
+5. Returns descriptor to guest virtqueue
+
+**Key Design Elements**:
+- **user_data tracking**: Links completions back to original requests (descriptor chain index)
+- **Inflight queue**: VecDeque maintains submitted-but-not-completed requests
+- **Out-of-order handling**: Completions may arrive in different order than submissions
+- **Event-driven**: io_uring eventfd integrated with epoll for notification
+- **Zero-copy**: iovecs point directly to guest memory (when alignment permits)
+
+**Batch Operations**:
+- `submit_batch_requests()` collects multiple operations and submits atomically
+- Reduces syscall overhead (one `submit()` for many I/O operations)
+- Currently only implemented for RAW format
+
+**Current Architecture Blocks Async for QCOW2**
+
+Multiple fundamental issues prevent extending this pattern to QCOW2:
 
 **1. Mutable Self Everywhere**
 ```rust
@@ -215,8 +248,36 @@ All formats forced into same synchronous traits:
 - **Concurrent operations**: Multiple I/O requests in flight simultaneously
 - **Better resource utilization**: I/O waits don't block CPU work
 - **Scalability**: Handle more requests with same thread count
-- **Proper batch processing**: True parallel I/O via io_uring/AIO
+- **Proper batch processing**: True parallel I/O via io_uring/AIO (as demonstrated by RAW format)
 - **Non-blocking format operations**: Can process one cluster while waiting for another
+
+**QCOW2-Specific Async Challenges**
+
+Beyond the general issues listed above, QCOW2 faces unique challenges for async I/O:
+
+1. **Multi-step operations**: Reading a cluster requires:
+   - L1 table lookup (metadata read)
+   - L2 table lookup (metadata read)  
+   - Data cluster read (actual I/O)
+   - Possible decompression (CPU-bound)
+   
+   Each step depends on the previous one, requiring state machine or async/await
+
+2. **Copy-on-write complexity**: Writes may trigger:
+   - Refcount lookups/updates
+   - New cluster allocation
+   - L2 table updates
+   - Multiple I/O operations before guest write completes
+
+3. **Cache invalidation**: Async operations on cached metadata need careful ordering to prevent:
+   - Reading stale L2 entries
+   - Lost updates when multiple async operations modify same metadata
+   - Requires `Arc<Mutex<Cache>>` pattern with proper locking
+
+4. **Compression + async**: Can't do both in single thread efficiently:
+   - Option 1: Async I/O reads compressed data, blocks thread for decompression
+   - Option 2: Offload decompression to thread pool, adds complexity
+   - Need strategy for mixing async I/O with CPU-intensive format operations
 
 ### Dependencies Between Improvements
 
@@ -401,7 +462,65 @@ cleanup can be done directly after Phase 3:
 
 ### Phase 5: Async Enhancement
 
+**Goal**: Extend the proven async I/O architecture (currently working for RAW format) to QCOW2 and other formats.
+
 **Task 5.1: Async Infrastructure**
+
+Build on existing RAW async patterns:
+
+1. **Adapt RAW's submission/completion pattern for QCOW2**:
+   - Implement `AsyncDiskFile` trait for QCOW2
+   - Create `QcowAsync` struct similar to `RawFileAsync`
+   - Reuse io_uring submission queue pattern from `raw_async.rs`
+   - Maintain same `user_data` tracking and inflight queue mechanisms
+
+2. **Handle multi-step QCOW2 operations**:
+   ```rust
+   // Each cluster read becomes multiple async operations:
+   enum QcowAsyncState {
+       ReadL2Entry { l1_offset, ... },
+       ReadCluster { cluster_offset, compressed, ... },
+       Decompressing { partial_data, ... },
+   }
+   ```
+   - State machine tracks multi-step operations
+   - Each completion advances state, may submit next operation
+   - Final state notifies virtio-blk layer via same completion queue
+
+3. **Thread-safe metadata access**:
+   ```rust
+   struct QcowAsync {
+       l1_table: Arc<RwLock<Vec<u64>>>,
+       l2_cache: Arc<Mutex<LruCache<u64, L2Table>>>,
+       refcount_cache: Arc<Mutex<Cache>>,
+       io_uring: IoUring,
+   }
+   ```
+   - Locks protect concurrent access from multiple async operations
+   - Short-lived locks: read metadata, release, submit I/O
+   - No locks held across async points
+
+4. **Batch operations for QCOW2**:
+   - Collect non-compressed sequential clusters
+   - Submit as batch to io_uring (like RAW format does)
+   - Handle compressed clusters individually with decompression offload
+
+**Task 5.2: Compression Handling**
+
+QCOW2 compression creates CPU-bound work in async path. Two strategies:
+
+**Option A: Inline decompression**
+- Read compressed data asynchronously
+- Decompress synchronously when completion arrives
+- Simple but blocks thread during decompression
+
+**Option B: Decompression pool**
+- Read compressed data asynchronously  
+- Submit to rayon thread pool for decompression
+- Another async completion when decompression finishes
+- Complex but maintains thread responsiveness
+
+Start with Option A, consider Option B if profiling shows compression as bottleneck.
 - Blocking thread pool for decompression
 - Async trait implementations
 - State management for concurrent ops

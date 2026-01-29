@@ -58,6 +58,10 @@ impl DiskFile for RawFileDiskAio {
         }
     }
 
+    fn supports_sparse_operations(&self) -> bool {
+        true
+    }
+
     fn fd(&mut self) -> BorrowedDiskFd<'_> {
         BorrowedDiskFd::new(self.file.as_raw_fd())
     }

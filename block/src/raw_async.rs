@@ -59,6 +59,10 @@ impl DiskFile for RawFileDisk {
         self.file.set_len(size).map_err(DiskFileError::ResizeError)
     }
 
+    fn supports_sparse_operations(&self) -> bool {
+        true
+    }
+
     fn fd(&mut self) -> BorrowedDiskFd<'_> {
         BorrowedDiskFd::new(self.file.as_raw_fd())
     }

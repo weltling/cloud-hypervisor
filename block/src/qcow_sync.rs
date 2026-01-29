@@ -59,6 +59,10 @@ impl DiskFile for QcowDiskSync {
         Ok(Box::new(QcowSync::new(Arc::clone(&self.qcow_file))) as Box<dyn AsyncIo>)
     }
 
+    fn supports_sparse_operations(&self) -> bool {
+        true
+    }
+
     fn fd(&mut self) -> BorrowedDiskFd<'_> {
         BorrowedDiskFd::new(self.qcow_file.lock().unwrap().as_raw_fd())
     }

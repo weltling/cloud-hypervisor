@@ -13,7 +13,7 @@ use vmm_sys_util::eventfd::EventFd;
 use crate::async_io::{
     AsyncIo, AsyncIoError, AsyncIoResult, BorrowedDiskFd, DiskFile, DiskFileError, DiskFileResult,
 };
-use crate::qcow::{QcowFile, RawFile, Result as QcowResult};
+use crate::qcow::{MAX_NESTING_DEPTH, QcowFile, RawFile, Result as QcowResult};
 use crate::{AsyncAdaptor, BlockBackend};
 
 pub struct QcowDiskSync {
@@ -29,9 +29,13 @@ pub struct QcowDiskSync {
 }
 
 impl QcowDiskSync {
-    pub fn new(file: File, direct_io: bool) -> QcowResult<Self> {
+    pub fn new(file: File, direct_io: bool, sparse: bool) -> QcowResult<Self> {
         Ok(QcowDiskSync {
-            qcow_file: Arc::new(Mutex::new(QcowFile::from(RawFile::new(file, direct_io))?)),
+            qcow_file: Arc::new(Mutex::new(QcowFile::from_with_nesting_depth(
+                RawFile::new(file, direct_io),
+                MAX_NESTING_DEPTH,
+                sparse,
+            )?)),
         })
     }
 }

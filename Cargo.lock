@@ -1585,6 +1585,7 @@ dependencies = [
  "serde_json",
  "test_infra",
  "thiserror 2.0.18",
+ "vmm-sys-util",
 ]
 
 [[package]]

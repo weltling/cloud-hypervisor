@@ -222,16 +222,15 @@ impl super::AsyncIoEngine for IoUringEngine {
         self.fallocate(fd, offset, length, user_data, mode, err)
     }
 
-    fn batch_requests_enabled(&self) -> bool {
-        true
-    }
-
     fn submit_batch_requests(
         &mut self,
         fd: BorrowedDiskFd<'_>,
         mut batch_request: Vec<BatchRequest>,
         requests: &mut HashMap<u64, Option<IoBuf>>,
     ) -> Result<(), AsyncIoError> {
+        if batch_request.is_empty() {
+            return Ok(());
+        }
         let (submitter, mut sq, _) = self.io_uring.split();
 
         for req in batch_request.drain(..) {
@@ -254,6 +253,9 @@ impl super::AsyncIoEngine for IoUringEngine {
                     // we are guaranteed that the memory is still valid here,
                     // and we have just registered it to make sure it stays
                     // valid while the kernel is using it.
+                    // Furthermore, IoBuf::iovec guarantees that the returned
+                    // iovec will not move even when the IoBuf moves (as the
+                    // hashmap resizes).
                     unsafe {
                         sq.push(
                             &opcode::Readv::new(
@@ -278,6 +280,9 @@ impl super::AsyncIoEngine for IoUringEngine {
                     // we are guaranteed that the memory is still valid here,
                     // and we have just registered it to make sure it stays
                     // valid while the kernel is using it.
+                    // Furthermore, IoBuf::iovec guarantees that the returned
+                    // iovec will not move even when the IoBuf moves (as the
+                    // hashmap resizes).
                     unsafe {
                         sq.push(
                             &opcode::Writev::new(
@@ -301,19 +306,11 @@ impl super::AsyncIoEngine for IoUringEngine {
                     unreachable!("Unexpected batch request type: {:?}", req.request_type)
                 }
             }
-
-            // It is absolutely necessary to submit each request immediately
-            // after it is enqueued, rather than enquing a batch of operations.
-            // Not doing so causes failures about 50% ot the time. The failures
-            // are unpredictable and include both EFAULT and random hangs.
-            //
-            // The author of this code (Demi) suspects this is a bug in version
-            // 0.7.11 of the io-uring crate.
-            sq.sync();
-            submitter
-                .submit()
-                .map_err(AsyncIoError::SubmitBatchRequests)?;
         }
+        sq.sync();
+        submitter
+            .submit()
+            .map_err(AsyncIoError::SubmitBatchRequests)?;
 
         Ok(())
     }

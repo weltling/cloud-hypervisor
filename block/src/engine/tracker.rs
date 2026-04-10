@@ -27,8 +27,8 @@ use log::warn;
 use vmm_sys_util::eventfd::EventFd;
 
 use super::Completion;
+use crate::IoBuf;
 use crate::async_io::{AsyncIoError, AsyncIoResult, BorrowedDiskFd};
-use crate::{BatchRequest, IoBuf};
 
 pub struct Tracker<T: super::AsyncIoEngine> {
     engine: T,
@@ -135,10 +135,6 @@ impl<T: super::AsyncIoEngine> Tracker<T> {
         self.engine.notifier()
     }
 
-    pub fn batch_requests_enabled(&self) -> bool {
-        self.engine.batch_requests_enabled()
-    }
-
     pub fn write_vectored(
         &mut self,
         fd: BorrowedDiskFd,
@@ -191,15 +187,6 @@ impl<T: super::AsyncIoEngine> Tracker<T> {
             }
             e
         })
-    }
-
-    pub fn submit_batch_requests(
-        &mut self,
-        fd: BorrowedDiskFd,
-        batch_requests: Vec<BatchRequest>,
-    ) -> Result<(), AsyncIoError> {
-        let Tracker { engine, requests } = self;
-        engine.submit_batch_requests(fd, batch_requests, requests)
     }
 
     pub fn next_completed_request(&mut self) -> Option<Completion> {

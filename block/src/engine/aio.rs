@@ -212,8 +212,4 @@ impl AsyncIoEngine for AioEngine {
         assert!(batch_requests.is_empty(), "not supported");
         Ok(())
     }
-
-    fn batch_requests_enabled(&self) -> bool {
-        false
-    }
 }

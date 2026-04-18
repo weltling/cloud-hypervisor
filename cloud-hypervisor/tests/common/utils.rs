@@ -885,7 +885,6 @@ pub(crate) fn disk_check_consistency(
     }
 
     if let Some((backing_path, _format, initial_checksum)) = initial_backing_checksum {
-        #[cfg(feature = "enable_broken_qcow2")]
         if format.parse::<block::qcow::ImageType>().ok() != Some(block::qcow::ImageType::Raw) {
             let output = run_qemu_img(&backing_path, &["check"], None);
 

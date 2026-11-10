@@ -174,6 +174,7 @@ mod tests {
     };
     use crate::disk_file::{AsyncDiskFile, DiskSize, PhysicalSize, Resizable};
     use crate::factory::{DiskOpenOptions, open_disk};
+    use crate::test_util::require_direct_io;
     use crate::test_util::shared::QemuImgCommand;
     use crate::{ImageType, Request, SECTOR_SIZE};
 
@@ -439,6 +440,12 @@ mod tests {
     #[test]
     fn qemu_img_sync_data_round_trip() {
         assert_qemu_img_data_round_trip(false, false);
+    }
+
+    #[test]
+    fn qemu_img_sync_direct_data_round_trip() {
+        require_direct_io!();
+        assert_qemu_img_data_round_trip(false, true);
     }
 
     #[test]

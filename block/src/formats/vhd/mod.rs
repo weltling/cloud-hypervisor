@@ -448,6 +448,12 @@ mod tests {
         assert_qemu_img_data_round_trip(false, true);
     }
 
+    #[cfg(feature = "io_uring")]
+    #[test]
+    fn qemu_img_io_uring_data_round_trip() {
+        assert_qemu_img_data_round_trip(true, false);
+    }
+
     #[test]
     fn new_sync_returns_correct_size() {
         let file = make_vhd_file();

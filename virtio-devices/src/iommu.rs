@@ -1726,11 +1726,11 @@ mod tests {
     use vmm_sys_util::eventfd::{EFD_NONBLOCK, EventFd};
 
     use super::{
-        Domain, Error, Iommu, IommuMapping, Mapping, Request, VIRTIO_IOMMU_S_DEVERR,
-        VIRTIO_IOMMU_S_INVAL, VIRTIO_IOMMU_S_NOENT, VIRTIO_IOMMU_S_OK, VIRTIO_IOMMU_S_RANGE,
-        VIRTIO_IOMMU_T_ATTACH, VIRTIO_IOMMU_T_DETACH, VIRTIO_IOMMU_T_MAP, VIRTIO_IOMMU_T_UNMAP,
-        VirtioIommuReqAttach, VirtioIommuReqDetach, VirtioIommuReqHead, VirtioIommuReqMap,
-        VirtioIommuReqTail, VirtioIommuReqUnmap,
+        Domain, Error, Iommu, IommuMapping, Mapping, Request, VIRTIO_IOMMU_ATTACH_F_BYPASS,
+        VIRTIO_IOMMU_S_DEVERR, VIRTIO_IOMMU_S_INVAL, VIRTIO_IOMMU_S_NOENT, VIRTIO_IOMMU_S_OK,
+        VIRTIO_IOMMU_S_RANGE, VIRTIO_IOMMU_T_ATTACH, VIRTIO_IOMMU_T_DETACH, VIRTIO_IOMMU_T_MAP,
+        VIRTIO_IOMMU_T_UNMAP, VirtioIommuReqAttach, VirtioIommuReqDetach, VirtioIommuReqHead,
+        VirtioIommuReqMap, VirtioIommuReqTail, VirtioIommuReqUnmap,
     };
     use crate::{DmaRemapping, GuestMemory};
 
@@ -1770,7 +1770,7 @@ mod tests {
         let mapping: Arc<dyn ExternalDmaMapping> = Arc::new(MockMapping);
         let weak: Weak<dyn ExternalDmaMapping> = Arc::downgrade(&mapping);
 
-        iommu.add_external_mapping(0x100, mapping);
+        iommu.add_external_mapping(0x100, mapping).unwrap();
 
         // Removing the mapping succeeds.
         let removed = iommu.remove_external_mapping(0x100);
@@ -1814,6 +1814,7 @@ mod tests {
         IommuMapping {
             endpoints: Arc::new(RwLock::new(endpoints)),
             domains: Arc::new(RwLock::new(domains)),
+            dma_memory_regions: Arc::new(RwLock::new(BTreeMap::new())),
             bypass: AtomicBool::new(false),
             msi_iova_space: (0, 0),
         }
@@ -2067,24 +2068,141 @@ mod tests {
         assert_eq!(mapping.domains.read().unwrap()[&0].mappings.len(), 1);
     }
 
+    #[derive(Default)]
+    struct MappingRecorder {
+        maps: Mutex<Vec<(u64, u64, u64)>>,
+        unmaps: Mutex<Vec<(u64, u64)>>,
+    }
+
+    impl ExternalDmaMapping for MappingRecorder {
+        fn map(&self, iova: u64, gpa: u64, size: u64) -> Result<(), ExternalDmaMappingError> {
+            self.maps.lock().unwrap().push((iova, gpa, size));
+            Ok(())
+        }
+
+        fn unmap(&self, iova: u64, size: u64) -> Result<(), ExternalDmaMappingError> {
+            self.unmaps.lock().unwrap().push((iova, size));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn bypass_attach_maps_guest_memory_and_detach_unmaps_it() {
+        let recorder = Arc::new(MappingRecorder::default());
+        let ext_mapping: BTreeMap<u32, Arc<dyn ExternalDmaMapping>> =
+            BTreeMap::from([(0, Arc::clone(&recorder) as Arc<dyn ExternalDmaMapping>)]);
+        let mapping = Arc::new(iommu_mapping(&[]));
+        mapping.endpoints.write().unwrap().clear();
+        mapping.domains.write().unwrap().clear();
+        mapping
+            .dma_memory_regions
+            .write()
+            .unwrap()
+            .insert(0, 0x10000);
+        let attach = VirtioIommuReqAttach {
+            domain: 0,
+            endpoint: 0,
+            flags: VIRTIO_IOMMU_ATTACH_F_BYPASS,
+            ..Default::default()
+        };
+
+        let (len, status) = process_request(VIRTIO_IOMMU_T_ATTACH, attach, &mapping, &ext_mapping);
+        assert_eq!(len.unwrap(), TAIL_LEN);
+        assert_eq!(status, VIRTIO_IOMMU_S_OK);
+        assert_eq!(*recorder.maps.lock().unwrap(), vec![(0, 0, 0x10000)]);
+        assert!(mapping.domains.read().unwrap()[&0].bypass);
+        assert_eq!(mapping.domains.read().unwrap()[&0].mappings[&0].gpa, 0);
+
+        let detach = VirtioIommuReqDetach {
+            domain: 0,
+            endpoint: 0,
+            ..Default::default()
+        };
+        let (len, status) = process_request(VIRTIO_IOMMU_T_DETACH, detach, &mapping, &ext_mapping);
+        assert_eq!(len.unwrap(), TAIL_LEN);
+        assert_eq!(status, VIRTIO_IOMMU_S_OK);
+        assert_eq!(*recorder.unmaps.lock().unwrap(), vec![(0, 0x10000)]);
+        assert!(mapping.domains.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn external_mapping_replays_restored_domain() {
+        let mut iommu = new_iommu();
+        iommu.mapping.endpoints.write().unwrap().insert(7, 0);
+        iommu.mapping.domains.write().unwrap().insert(
+            0,
+            Domain {
+                mappings: BTreeMap::from([(
+                    0x1000,
+                    Mapping {
+                        gpa: 0x4000,
+                        size: 0x2000,
+                        flags: Mapping::unrestricted_flags(),
+                    },
+                )]),
+                bypass: false,
+            },
+        );
+        let recorder = Arc::new(MappingRecorder::default());
+
+        iommu
+            .add_external_mapping(7, Arc::clone(&recorder) as Arc<dyn ExternalDmaMapping>)
+            .unwrap();
+
+        assert_eq!(
+            *recorder.maps.lock().unwrap(),
+            vec![(0x1000, 0x4000, 0x2000)]
+        );
+    }
+
+    #[test]
+    fn bypass_memory_mapping_tracks_later_memory_updates() {
+        let mut iommu = new_iommu();
+        let recorder = Arc::new(MappingRecorder::default());
+        let memory_mapping = iommu
+            .add_external_mapping(0, Arc::clone(&recorder) as Arc<dyn ExternalDmaMapping>)
+            .unwrap();
+        let ext_mapping = iommu.ext_mapping.lock().unwrap();
+        let mapping = Arc::clone(&iommu.mapping);
+        let request = VirtioIommuReqAttach {
+            domain: 0,
+            endpoint: 0,
+            flags: VIRTIO_IOMMU_ATTACH_F_BYPASS,
+            ..Default::default()
+        };
+        let (len, status) = process_request(VIRTIO_IOMMU_T_ATTACH, request, &mapping, &ext_mapping);
+        drop(ext_mapping);
+
+        assert_eq!(len.unwrap(), TAIL_LEN);
+        assert_eq!(status, VIRTIO_IOMMU_S_OK);
+        memory_mapping.map(0x20000, 0x20000, 0x4000).unwrap();
+        assert_eq!(
+            mapping.domains.read().unwrap()[&0].mappings[&0x20000].gpa,
+            0x20000
+        );
+
+        memory_mapping.unmap(0x20000, 0x4000).unwrap();
+        assert!(
+            !mapping.domains.read().unwrap()[&0]
+                .mappings
+                .contains_key(&0x20000)
+        );
+        assert_eq!(*recorder.unmaps.lock().unwrap(), vec![(0x20000, 0x4000)]);
+    }
+
     #[test]
     fn external_attach_and_detach_failures_report_device_error() {
         let ext_mapping: BTreeMap<u32, Arc<dyn ExternalDmaMapping>> =
             BTreeMap::from([(0, Arc::new(FailingMapping) as Arc<dyn ExternalDmaMapping>)]);
-        // Attaching to domain 0 replays its mappings; moving to domain 1
-        // first unmaps the old domain. Both failures must reach the driver.
-        for domain in [0, 1] {
-            let mapping = Arc::new(iommu_mapping(&[(0x1000, 0x4000, 0x1000)]));
-            let request = VirtioIommuReqAttach {
-                domain,
-                endpoint: 0,
-                ..Default::default()
-            };
-            let (len, status) =
-                process_request(VIRTIO_IOMMU_T_ATTACH, request, &mapping, &ext_mapping);
-            assert_eq!(len.unwrap(), TAIL_LEN);
-            assert_eq!(status, VIRTIO_IOMMU_S_DEVERR);
-        }
+        let mapping = Arc::new(iommu_mapping(&[(0x1000, 0x4000, 0x1000)]));
+        let request = VirtioIommuReqAttach {
+            domain: 1,
+            endpoint: 0,
+            ..Default::default()
+        };
+        let (len, status) = process_request(VIRTIO_IOMMU_T_ATTACH, request, &mapping, &ext_mapping);
+        assert_eq!(len.unwrap(), TAIL_LEN);
+        assert_eq!(status, VIRTIO_IOMMU_S_DEVERR);
 
         let mapping = Arc::new(iommu_mapping(&[(0x1000, 0x4000, 0x1000)]));
         let request = VirtioIommuReqDetach::default();

@@ -1778,6 +1778,13 @@ impl DeviceManager {
                     .map_err(DeviceManagerError::RestoreGetState)?,
             )
             .map_err(DeviceManagerError::CreateVirtioIommu)?;
+            for zone in self.memory_manager.lock().unwrap().memory_zones().values() {
+                for region in zone.regions() {
+                    device
+                        .add_memory_region(region.start_addr().raw_value(), region.len())
+                        .map_err(DeviceManagerError::VirtioDmaMap)?;
+                }
+            }
             let device = Arc::new(Mutex::new(device));
             self.iommu_device = Some(Arc::clone(&device));
             self.iommu_mapping = Some(mapping);
@@ -4510,10 +4517,24 @@ impl DeviceManager {
             let vfio_context = self.create_vfio_context()?;
 
             if let Some(iommu) = &self.iommu_device {
-                iommu.lock().unwrap().add_external_mapping(
-                    pci_device_bdf.into(),
-                    Arc::clone(&vfio_context.dma_mapping),
-                );
+                let memory_mapping = iommu
+                    .lock()
+                    .unwrap()
+                    .add_external_mapping(
+                        pci_device_bdf.into(),
+                        Arc::clone(&vfio_context.dma_mapping),
+                    )
+                    .map_err(DeviceManagerError::VirtioDmaMap)?;
+                for virtio_mem_device in self.virtio_mem_devices.iter() {
+                    virtio_mem_device
+                        .lock()
+                        .unwrap()
+                        .add_dma_mapping_handler(
+                            VirtioMemMappingSource::Device(pci_device_bdf.into()),
+                            &memory_mapping,
+                        )
+                        .map_err(DeviceManagerError::AddDmaMappingHandlerVirtioMem)?;
+                }
             } else {
                 return Err(DeviceManagerError::MissingVirtualIommu);
             }
@@ -5075,10 +5096,21 @@ impl DeviceManager {
         if let Some(dma_handler) = &dma_handler {
             if iommu_mapping.is_some() {
                 if let Some(iommu) = &self.iommu_device {
-                    iommu
+                    let memory_mapping = iommu
                         .lock()
                         .unwrap()
-                        .add_external_mapping(pci_device_bdf.into(), Arc::clone(dma_handler));
+                        .add_external_mapping(pci_device_bdf.into(), Arc::clone(dma_handler))
+                        .map_err(DeviceManagerError::VirtioDmaMap)?;
+                    for virtio_mem_device in self.virtio_mem_devices.iter() {
+                        virtio_mem_device
+                            .lock()
+                            .unwrap()
+                            .add_dma_mapping_handler(
+                                VirtioMemMappingSource::Device(pci_device_bdf.into()),
+                                &memory_mapping,
+                            )
+                            .map_err(DeviceManagerError::AddDmaMappingHandlerVirtioMem)?;
+                    }
                 } else {
                     return Err(DeviceManagerError::MissingVirtualIommu);
                 }
@@ -5440,6 +5472,14 @@ impl DeviceManager {
             }
         }
 
+        if let Some(iommu) = &self.iommu_device {
+            iommu
+                .lock()
+                .unwrap()
+                .add_memory_region(new_region.start_addr().0, new_region.len())
+                .map_err(DeviceManagerError::VirtioDmaMap)?;
+        }
+
         // Take care of updating the memory for VFIO PCI devices.
         if let Some(vfio_context) = self.vfio_context.upgrade() {
             let gpa = new_region.start_addr().raw_value();
@@ -5701,7 +5741,7 @@ impl DeviceManager {
                             Arc::clone(&vfio_pci_device) as Arc<Mutex<dyn PciDevice>>,
                             Arc::clone(&vfio_pci_device) as Arc<dyn BusDeviceSync>,
                             None as Option<Arc<Mutex<dyn virtio_devices::VirtioDevice>>>,
-                            false,
+                            iommu_attached,
                         )
                     }
                     PciDeviceHandle::Virtio(virtio_pci_device) => {
@@ -5742,7 +5782,7 @@ impl DeviceManager {
                             Arc::clone(&virtio_pci_device) as Arc<Mutex<dyn PciDevice>>,
                             Arc::clone(&virtio_pci_device) as Arc<dyn BusDeviceSync>,
                             Some(dev.virtio_device()),
-                            dev.dma_handler().is_some() && !iommu_attached,
+                            dev.dma_handler().is_some(),
                         )
                     }
                     PciDeviceHandle::VfioUser {

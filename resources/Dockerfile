@@ -168,3 +168,6 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
     && unzip ethr_linux.zip \
     && cp ethr /usr/local/bin \
     && rm ethr_linux.zip; fi
+
+COPY scripts/install_grcov.sh /tmp/install_grcov.sh
+RUN bash /tmp/install_grcov.sh /usr/local/bin && rm /tmp/install_grcov.sh

@@ -2,9 +2,13 @@ name: Cloud Hypervisor's Docker image update
 on:
   push:
     branches: main
-    paths: resources/Dockerfile
+    paths:
+      - resources/Dockerfile
+      - scripts/install_grcov.sh
   pull_request:
-    paths: resources/Dockerfile
+    paths:
+      - resources/Dockerfile
+      - scripts/install_grcov.sh
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
@@ -55,6 +59,7 @@ jobs:
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
+          context: .
           file: ./resources/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}

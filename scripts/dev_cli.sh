@@ -697,7 +697,9 @@ cmd_tests() {
 build_container() {
     ensure_build_dir
 
-    cp "$CLH_DOCKERFILE" "$CLH_CTR_BUILD_DIR"
+    mkdir -p "$CLH_CTR_BUILD_DIR/scripts" || return 1
+    cp "$CLH_DOCKERFILE" "$CLH_CTR_BUILD_DIR" || return 1
+    cp "$CLH_SCRIPTS_DIR/install_grcov.sh" "$CLH_CTR_BUILD_DIR/scripts/" || return 1
 
     [ "$(uname -m)" = "aarch64" ] && TARGETARCH="arm64"
     [ "$(uname -m)" = "x86_64" ] && TARGETARCH="amd64"

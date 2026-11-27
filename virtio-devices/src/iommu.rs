@@ -438,6 +438,26 @@ impl TrackedDmaMapping {
         }
         Ok(())
     }
+
+    fn map_identity_ranges(
+        &mut self,
+        endpoint: u32,
+        ranges: &[(u64, u64)],
+    ) -> result::Result<(), ExternalDmaMappingError> {
+        // A failed attach can leave ranges behind if its rollback also failed.
+        self.unmap_all()?;
+        for &(gpa, size) in ranges {
+            if let Err(e) = self.map(gpa, gpa, size) {
+                if let Err(rollback) = self.unmap_all() {
+                    warn!(
+                        "Failed to roll back bypass mappings for endpoint {endpoint}: {rollback}"
+                    );
+                }
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
 }
 
 type ExternalDmaRegistry = BTreeMap<u32, TrackedDmaMapping>;
@@ -562,13 +582,19 @@ impl Request {
                         }
                     }
 
-                    let mut old_domain_id = domain_id;
-                    if let Some(&id) = mapping.endpoints.read().unwrap().get(&endpoint) {
-                        old_domain_id = id;
+                    let old_domain_id = mapping.endpoints.read().unwrap().get(&endpoint).copied();
+                    if bypass && old_domain_id == Some(domain_id) {
+                        return Ok(());
                     }
 
-                    if old_domain_id != domain_id {
+                    if let Some(old_domain_id) = old_domain_id.filter(|&old| old != domain_id) {
                         detach_endpoint_from_domain(endpoint, old_domain_id, mapping, ext_mapping)?;
+                    }
+
+                    if bypass && let Some(ext_map) = ext_mapping.get_mut(&endpoint) {
+                        ext_map
+                            .map_identity_ranges(endpoint, &mapping.static_dma_ranges)
+                            .map_err(Error::ExternalMapping)?;
                     }
 
                     // Add endpoint associated with specific domain
@@ -580,7 +606,9 @@ impl Request {
 
                     // If any other mappings exist in the domain for other containers,
                     // make sure to issue these mappings for the new endpoint/container
-                    if let Some(domain_mappings) = &mapping.domains.read().unwrap().get(&domain_id)
+                    if !bypass
+                        && let Some(domain_mappings) =
+                            mapping.domains.read().unwrap().get(&domain_id)
                         && let Some(ext_map) = ext_mapping.get_mut(&endpoint)
                     {
                         for (virt_start, addr_map) in &domain_mappings.mappings {
@@ -1120,6 +1148,7 @@ pub struct IommuMapping {
     // are in bypass mode.
     bypass: AtomicBool,
     msi_iova_space: (u64, u64),
+    static_dma_ranges: Vec<(u64, u64)>,
 }
 
 // Inclusive end of `[addr, addr+size)`. Returns None for zero size or
@@ -1349,6 +1378,7 @@ impl Iommu {
         exit_evt: EventFd,
         msi_iova_space: (u64, u64),
         reserved_regions: Vec<(u64, u64)>,
+        static_dma_ranges: Vec<(u64, u64)>,
         address_width_bits: u8,
         access_platform_enabled: bool,
         state: Option<IommuState>,
@@ -1424,6 +1454,7 @@ impl Iommu {
             domains: Arc::new(RwLock::new(domains)),
             bypass: AtomicBool::new(true),
             msi_iova_space,
+            static_dma_ranges,
         });
 
         Ok((
@@ -1500,7 +1531,25 @@ impl Iommu {
                 endpoint: device_id,
             });
         };
-        entry.insert(TrackedDmaMapping::new(mapping));
+        let mut backend = TrackedDmaMapping::new(mapping);
+        let domain = self
+            .mapping
+            .endpoints
+            .read()
+            .unwrap()
+            .get(&device_id)
+            .copied();
+        if domain.is_some_and(|id| {
+            self.mapping
+                .domains
+                .read()
+                .unwrap()
+                .get(&id)
+                .is_some_and(|d| d.bypass)
+        }) {
+            backend.map_identity_ranges(device_id, &self.mapping.static_dma_ranges)?;
+        }
+        entry.insert(backend);
         Ok(())
     }
 
@@ -1685,12 +1734,17 @@ mod tests {
     }
 
     fn new_iommu() -> Iommu {
+        new_iommu_with_ranges(Vec::new())
+    }
+
+    fn new_iommu_with_ranges(static_dma_ranges: Vec<(u64, u64)>) -> Iommu {
         let (iommu, _mapping) = Iommu::new(
             "test-iommu".to_string(),
             SeccompAction::Allow,
             EventFd::new(EFD_NONBLOCK).unwrap(),
             (0, 0),
             Vec::new(),
+            static_dma_ranges,
             64,
             false,
             None,
@@ -1753,6 +1807,7 @@ mod tests {
             domains: Arc::new(RwLock::new(domains)),
             bypass: AtomicBool::new(false),
             msi_iova_space: (0, 0),
+            static_dma_ranges: Vec::new(),
         }
     }
 
@@ -2097,6 +2152,7 @@ mod tests {
                 SeccompAction::Allow,
                 EventFd::new(EFD_NONBLOCK).unwrap(),
                 (0, 0),
+                Vec::new(),
                 Vec::new(),
                 64,
                 false,

@@ -3722,7 +3722,10 @@ pub(crate) fn _test_vdpa_block(guest: &Guest) {
     let mut child = GuestCommand::new(guest)
         .default_cpus()
         .args(["--memory", "size=1G,hugepages=on"])
-        .default_kernel_cmdline_with_platform(Some("num_pci_segments=2,iommu_segments=1"))
+        .default_kernel_cmdline_with_platform_and_extra(
+            Some("num_pci_segments=2,iommu_segments=1"),
+            Some("iommu.passthrough=1"),
+        )
         .default_disks()
         .default_net()
         .args(["--vdpa", "path=/dev/vhost-vdpa-0,num_queues=1"])

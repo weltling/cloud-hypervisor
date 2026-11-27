@@ -2208,6 +2208,93 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct BypassRecorder {
+        maps: Mutex<Vec<(u64, u64, u64)>>,
+        unmaps: Mutex<Vec<(u64, u64)>>,
+        fail_at: Option<u64>,
+    }
+
+    impl ExternalDmaMapping for BypassRecorder {
+        fn map(&self, iova: u64, gpa: u64, size: u64) -> Result<(), ExternalDmaMappingError> {
+            if self.fail_at == Some(iova) {
+                return FailingMapping.map(iova, gpa, size);
+            }
+            self.maps.lock().unwrap().push((iova, gpa, size));
+            Ok(())
+        }
+
+        fn unmap(&self, iova: u64, size: u64) -> Result<(), ExternalDmaMappingError> {
+            self.unmaps.lock().unwrap().push((iova, size));
+            Ok(())
+        }
+    }
+
+    fn bypass_attach(iommu: &Iommu) -> u8 {
+        let (len, status) = process_tracked_request(
+            VIRTIO_IOMMU_T_ATTACH,
+            VirtioIommuReqAttach {
+                flags: super::VIRTIO_IOMMU_ATTACH_F_BYPASS,
+                ..Default::default()
+            },
+            &iommu.mapping,
+            &mut iommu.ext_mapping.lock().unwrap(),
+        );
+        len.unwrap();
+        status
+    }
+
+    #[test]
+    fn bypass_attach_maps_static_ram_and_detach_unmaps_it() {
+        let mut iommu = new_iommu_with_ranges(vec![(0x1000, 0x1000), (0x4000, 0x2000)]);
+        let backend = Arc::new(BypassRecorder::default());
+        iommu.add_external_mapping(0, backend.clone()).unwrap();
+
+        assert_eq!(bypass_attach(&iommu), VIRTIO_IOMMU_S_OK);
+        assert_eq!(bypass_attach(&iommu), VIRTIO_IOMMU_S_OK);
+        assert_eq!(
+            *backend.maps.lock().unwrap(),
+            [(0x1000, 0x1000, 0x1000), (0x4000, 0x4000, 0x2000)]
+        );
+
+        let (len, status) = process_tracked_request(
+            VIRTIO_IOMMU_T_DETACH,
+            VirtioIommuReqDetach::default(),
+            &iommu.mapping,
+            &mut iommu.ext_mapping.lock().unwrap(),
+        );
+        len.unwrap();
+        assert_eq!(status, VIRTIO_IOMMU_S_OK);
+        assert_eq!(
+            *backend.unmaps.lock().unwrap(),
+            [(0x1000, 0x1000), (0x4000, 0x2000)]
+        );
+    }
+
+    #[test]
+    fn failed_bypass_attach_rolls_back_mapped_ram() {
+        let mut iommu = new_iommu_with_ranges(vec![(0x1000, 0x1000), (0x4000, 0x2000)]);
+        let backend = Arc::new(BypassRecorder {
+            fail_at: Some(0x4000),
+            ..Default::default()
+        });
+        iommu.add_external_mapping(0, backend.clone()).unwrap();
+
+        assert_eq!(bypass_attach(&iommu), VIRTIO_IOMMU_S_DEVERR);
+        assert!(iommu.mapping.endpoints.read().unwrap().is_empty());
+        assert_eq!(*backend.unmaps.lock().unwrap(), [(0x1000, 0x1000)]);
+    }
+
+    #[test]
+    fn backend_registration_maps_static_ram_for_an_attached_bypass_endpoint() {
+        let mut iommu = new_iommu_with_ranges(vec![(0x1000, 0x1000)]);
+        assert_eq!(bypass_attach(&iommu), VIRTIO_IOMMU_S_OK);
+
+        let backend = Arc::new(BypassRecorder::default());
+        iommu.add_external_mapping(0, backend.clone()).unwrap();
+        assert_eq!(*backend.maps.lock().unwrap(), [(0x1000, 0x1000, 0x1000)]);
+    }
+
     #[test]
     fn eject_unmaps_only_remaining_backend_ranges() {
         let mut iommu = new_iommu();

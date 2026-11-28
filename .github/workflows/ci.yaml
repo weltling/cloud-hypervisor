@@ -4,6 +4,7 @@ on:
   merge_group:
   push:
     branches:
+      - main
       - 'dev/*/*'
   # Only this run saves Rust caches. It runs after the rustc nightly release.
   schedule:
@@ -12,7 +13,7 @@ permissions:
   contents: read
   pull-requests: read
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha) || github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 jobs:
   preflight:
@@ -33,9 +34,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      # Scheduled runs only run the jobs that save Rust caches.
+      # Scheduled runs save Rust caches. Pushes to main publish unit test coverage.
       - id: changes
-        if: github.event_name != 'schedule'
+        if: github.event_name != 'schedule' && !(github.event_name == 'push' && github.ref == 'refs/heads/main')
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           predicate-quantifier: some-with-excludes
@@ -85,6 +86,7 @@ jobs:
   dco:
     name: dco
     needs: [preflight]
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -647,13 +649,15 @@ jobs:
   unit-tests-x86-64:
     name: unit-tests-x86-64
     needs: [preflight]
-    if: needs.preflight.outputs.full == 'true'
+    if: needs.preflight.outputs.full == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      COVERAGE_ARTIFACT: unit-test-coverage-x86-64-gnu
     strategy:
       fail-fast: false
       matrix:
-        libc: [gnu, musl]
+        libc: ${{ fromJSON((github.event_name == 'push' && github.ref == 'refs/heads/main') && '["gnu"]' || '["gnu", "musl"]') }}
     steps:
       - name: Code checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -664,7 +668,20 @@ jobs:
           set -eufo pipefail
           test -e /dev/kvm || { echo "::error::/dev/kvm missing on runner"; exit 1; }
       - name: Run unit tests
-        run: scripts/dev_cli.sh tests --unit --libc ${{ matrix.libc }}
+        if: matrix.libc == 'musl'
+        run: scripts/dev_cli.sh tests --unit --libc musl
+      - name: Run unit tests with coverage
+        if: matrix.libc == 'gnu'
+        run: |
+          scripts/dev_cli.sh tests --unit --coverage --libc gnu -- -- lcov
+          test -s coverage.info
+      - name: Upload unit test coverage report
+        if: matrix.libc == 'gnu'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.COVERAGE_ARTIFACT }}
+          path: coverage.info
+          if-no-files-found: error
   # PR-only: delay integration testing until the build and quality gates pass.
   integration-x86-64-pr:
     name: integration-x86-64-pr

@@ -682,6 +682,19 @@ jobs:
           name: ${{ env.COVERAGE_ARTIFACT }}
           path: coverage.info
           if-no-files-found: error
+      - name: Summarize coverage of PR changes
+        if: github.event_name == 'pull_request' && matrix.libc == 'gnu'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/diff-cover.md"
+          pipx run --spec diff-cover==11.0.4 diff-cover coverage.info \
+            --compare-branch HEAD^1 --ignore-staged --ignore-unstaged \
+            --format "markdown:$report"
+          {
+            printf '## GNU unit test coverage of PR changes\n\n'
+            cat "$report"
+          } >> "$GITHUB_STEP_SUMMARY"
   # PR-only: delay integration testing until the build and quality gates pass.
   integration-x86-64-pr:
     name: integration-x86-64-pr

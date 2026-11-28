@@ -553,13 +553,21 @@ cmd_tests() {
 
     if [[ "$unit" = true ]]; then
         say "Running unit tests for $target..."
+        local unit_rustflags="$rustflags"
+        local unit_profile_file="${LLVM_PROFILE_FILE:-}"
+        if [[ "$coverage" = true ]]; then
+            unit_rustflags="$unit_rustflags -C instrument-coverage"
+            unit_profile_file=${unit_profile_file:-ch-%p-%m.profraw}
+        fi
         run_container "$DOCKER_RUNTIME" run \
             "${common_args[@]}" \
             --device "$exported_device" \
             --device /dev/net/tun \
             --cap-add net_admin \
-            "${common_env_args[@]}" \
-            --env LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" \
+            --env BUILD_TARGET="$target" \
+            --env RUSTFLAGS="$unit_rustflags" \
+            --env TARGET_CC="$target_cc" \
+            --env LLVM_PROFILE_FILE="$unit_profile_file" \
             "$CTR_IMAGE" \
             ./scripts/run_unit_tests.sh "$@" || fix_dir_perms $? || exit $?
     fi
@@ -684,11 +692,15 @@ cmd_tests() {
 
     if [ "$coverage" = true ]; then
         say "Generating code coverage information for $target..."
+        coverage_args=("$@")
+        if [ -z "$hypervisor" ]; then
+            coverage_args=(--hypervisor "${exported_device##*/}" "$@")
+        fi
         run_container "$DOCKER_RUNTIME" run \
             "${common_args[@]}" \
             "${common_env_args[@]}" \
             "$CTR_IMAGE" \
-            dbus-run-session ./scripts/run_coverage.sh "$@" || fix_dir_perms $? || exit $?
+            dbus-run-session ./scripts/run_coverage.sh "${coverage_args[@]}" || fix_dir_perms $? || exit $?
     fi
 
     fix_dir_perms $?
@@ -697,7 +709,9 @@ cmd_tests() {
 build_container() {
     ensure_build_dir
 
-    cp "$CLH_DOCKERFILE" "$CLH_CTR_BUILD_DIR"
+    mkdir -p "$CLH_CTR_BUILD_DIR/scripts" || return 1
+    cp "$CLH_DOCKERFILE" "$CLH_CTR_BUILD_DIR" || return 1
+    cp "$CLH_SCRIPTS_DIR/install_grcov.sh" "$CLH_CTR_BUILD_DIR/scripts/" || return 1
 
     [ "$(uname -m)" = "aarch64" ] && TARGETARCH="arm64"
     [ "$(uname -m)" = "x86_64" ] && TARGETARCH="amd64"

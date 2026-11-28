@@ -15,24 +15,29 @@ pushd $PROJECT_DIR || exit
 
 export BUILD_TARGET=${BUILD_TARGET-$(uname -m)-unknown-linux-gnu}
 
-# GLIBC > 2.31
-GRCOV_RELEASE_URL="https://github.com/mozilla/grcov/releases/download/v0.8.19/grcov-$BUILD_TARGET.tar.bz2"
-wget --quiet "$GRCOV_RELEASE_URL" || exit 1
-tar -xjf "grcov-$BUILD_TARGET.tar.bz2"
-
-rustup component add llvm-tools-preview
+if ! command -v grcov >/dev/null; then
+    mkdir -p "$TARGET_DIR" || exit 1
+    grcov_dir=$(mktemp -d "$TARGET_DIR/grcov.XXXXXXXXXX") || exit 1
+    trap 'rm -rf -- "$grcov_dir"' EXIT
+    bash "$PROJECT_DIR/scripts/install_grcov.sh" "$grcov_dir" || exit 1
+    export PATH="$grcov_dir:$PATH"
+fi
 
 export_lcov() {
-    rm "coverage.info"
+    rm -f "coverage.info" || return 1
 
     mapfile -t profraw_files < <(find . -name 'ch-*.profraw' -print)
-    ./grcov "${profraw_files[@]}" -s . \
+    if [[ ${#profraw_files[@]} -eq 0 ]]; then
+        echo "No coverage profiles found. Run unit tests with --unit --coverage or set RUSTFLAGS and LLVM_PROFILE_FILE before running the tests." >&2
+        return 1
+    fi
+    grcov "${profraw_files[@]}" -s . \
         --ignore "tests/*" \
         --ignore "test_infra/*" \
         --ignore "performance-metrics/*" \
         --binary-path "$TARGET_DIR/$BUILD_TARGET/release/" \
         --branch --ignore-not-existing -t lcov \
-        -o "coverage.info"
+        -o "coverage.info" || return 1
 
     find . -type f -name 'ch-*.profraw' -exec rm {} \;
 }
@@ -42,7 +47,7 @@ export_html() {
     OUTPUT_DIR="$TARGET_DIR/coverage"
     rm -rf $OUTPUT_DIR
     mapfile -t profraw_files < <(find . -name 'ch-*.profraw' -print)
-    ./grcov "${profraw_files[@]}" -s . \
+    grcov "${profraw_files[@]}" -s . \
         --ignore "tests/*" \
         --ignore "test_infra/*" \
         --ignore "performance-metrics/*" \
@@ -65,6 +70,6 @@ if [[ $code != 0 ]]; then
 fi
 
 func=export_$type
-$func
+$func || exit 1
 
 popd || exit 1
